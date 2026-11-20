@@ -103,7 +103,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 pb-20 md:pb-10">
+    <div className="min-h-screen bg-slate-50 text-slate-900 pb-24 md:pb-10">
       {/* Strict 3-Zone Top Bar Contract */}
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur-md">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-8 px-4 py-3 sm:px-6 lg:px-8">
@@ -183,7 +183,7 @@ export default function App() {
       </header>
 
       {/* Main Content */}
-      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+      <main className="mx-auto max-w-7xl overflow-x-hidden px-4 py-6 sm:px-6 lg:px-8">
         {loading && !schedule ? (
           <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-600">
             Memuatkan jadual dan data Perkhemahan SK Tudan 2026...
@@ -245,7 +245,7 @@ export default function App() {
       {/* Mobile Fixed Bottom Tab Bar (Thumb Zone Ergonomics, <= 15% Viewport Cap) */}
       <nav
         aria-label="Navigasi Mudah Alih"
-        className="fixed bottom-0 left-0 right-0 z-30 grid grid-cols-3 border-t border-slate-200 bg-white/95 backdrop-blur-md md:hidden"
+        className="fixed bottom-0 left-0 right-0 z-30 grid grid-cols-3 border-t border-slate-200 bg-white/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-md md:hidden"
       >
         <button
           type="button"

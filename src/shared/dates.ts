@@ -64,3 +64,24 @@ export function formatTimestampMY(isoString: string | null | undefined): string 
     hour12: true,
   }).format(d);
 }
+
+export function formatDateTimePartsMY(
+  isoString: string | null | undefined
+): { date: string; time: string } | null {
+  if (!isoString) return null;
+  const d = new Date(isoString);
+  if (Number.isNaN(d.getTime())) return null;
+  const date = new Intl.DateTimeFormat('ms-MY', {
+    timeZone: MALAYSIA_TZ,
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  }).format(d);
+  const time = new Intl.DateTimeFormat('ms-MY', {
+    timeZone: MALAYSIA_TZ,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  }).format(d);
+  return { date, time };
+}

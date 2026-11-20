@@ -84,19 +84,35 @@ export async function apiFetch<T>(
 
   const text = await res.text();
   let json: Record<string, unknown> = {};
+  let parseFailed = false;
   if (text) {
     try {
-      json = JSON.parse(text) as Record<string, unknown>;
+      const parsed: unknown = JSON.parse(text);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        json = parsed as Record<string, unknown>;
+      } else {
+        parseFailed = true;
+        json = { error: 'Respons pelayan bukan objek JSON yang sah.' };
+      }
     } catch {
+      parseFailed = true;
       json = { error: text };
     }
   }
 
   if (!res.ok) {
     throw new ApiError(
-      typeof json.error === 'string'
+      typeof json.error === 'string' && !parseFailed
         ? json.error
         : `Permintaan gagal (${res.status}).`,
+      res.status,
+      json
+    );
+  }
+
+  if (parseFailed) {
+    throw new ApiError(
+      'Pelayan mengembalikan respons yang tidak sah. Sila muat semula halaman dan cuba lagi.',
       res.status,
       json
     );

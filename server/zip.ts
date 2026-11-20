@@ -45,7 +45,7 @@ export async function generateBulkZipArchive(
       : submittedSlotNumbers;
 
   if (targetSlots.length === 0) {
-    throw new Error('Tiada laporan berstatus "Telah dihantar" yang dipilih untuk dimuat turun.');
+    throw new Error('Tiada laporan yang telah dihantar dipilih untuk dimuat turun.');
   }
 
   const zip = new JSZip();

@@ -5,11 +5,9 @@ import { Router, type NextFunction, type Request, type Response } from 'express'
 import multer from 'multer';
 import sharp from 'sharp';
 import {
-  HANDOVER_STATUS_OPTIONS,
   MONITORING_QUESTIONS,
+  q6RequiresTentRepair,
   type AttendanceEntry,
-  type HandoverStatus,
-  type IncidentEntry,
 } from '../../src/shared/constants.ts';
 import {
   extractReportInfoFromImageBuffer,
@@ -114,8 +112,8 @@ function ensureDraftReportRow(campNightId: number, slotNumber: number): {
   const now = new Date().toISOString();
   const res = db
     .prepare(
-      `INSERT INTO reports (camp_night_id, slot_number, status, updated_at)
-       VALUES (?, ?, 'draft', ?)`
+      `INSERT INTO reports (camp_night_id, slot_number, status, form_version, updated_at)
+       VALUES (?, ?, 'draft', 2, ?)`
     )
     .run(campNightId, slotNumber, now);
   return { id: Number(res.lastInsertRowid), status: 'draft' };
@@ -155,11 +153,7 @@ router.put('/my-report/draft', authenticateOptional, requireTeacher, (req, res) 
     q5?: string | null;
     q6?: string | null;
     hasIncident?: 'Ya' | 'Tidak' | null;
-    incidents?: IncidentEntry[];
-    handoverStatus?: HandoverStatus | null;
-    handoverReceiver?: string;
-    handoverTime?: string;
-    handoverNote?: string;
+    observationNotes?: string;
     photoMeta?: {
       1?: { takenTime?: string; location?: string; caption?: string };
       2?: { takenTime?: string; location?: string; caption?: string };
@@ -188,7 +182,6 @@ router.put('/my-report/draft', authenticateOptional, requireTeacher, (req, res) 
 
   const now = new Date().toISOString();
   const attendanceJson = JSON.stringify(Array.isArray(body.attendance) ? body.attendance : []);
-  const incidentsJson = JSON.stringify(Array.isArray(body.incidents) ? body.incidents : []);
 
   db.prepare(
     `UPDATE reports
@@ -201,11 +194,8 @@ router.put('/my-report/draft', authenticateOptional, requireTeacher, (req, res) 
          q5 = ?,
          q6 = ?,
          has_incident = ?,
-         incidents_json = ?,
-         handover_status = ?,
-         handover_receiver = ?,
-         handover_time = ?,
-         handover_note = ?,
+         observation_notes = ?,
+         form_version = 2,
          updated_at = ?
      WHERE id = ?`
   ).run(
@@ -218,11 +208,7 @@ router.put('/my-report/draft', authenticateOptional, requireTeacher, (req, res) 
     body.q5 ?? null,
     body.q6 ?? null,
     body.hasIncident ?? null,
-    incidentsJson,
-    body.handoverStatus ?? null,
-    (body.handoverReceiver ?? '').toString(),
-    (body.handoverTime ?? '').toString(),
-    (body.handoverNote ?? '').toString(),
+    (body.observationNotes ?? '').toString(),
     now,
     row.id
   );
@@ -631,11 +617,8 @@ router.post('/my-report/submit', authenticateOptional, requireTeacher, (req, res
     q5?: string;
     q6?: string;
     hasIncident?: 'Ya' | 'Tidak';
-    incidents?: IncidentEntry[];
-    handoverStatus?: HandoverStatus;
-    handoverReceiver?: string;
-    handoverTime?: string;
-    handoverNote?: string;
+    observationNotes?: string;
+    submissionKey?: string;
     photoMeta?: {
       1?: { takenTime?: string; location?: string; caption?: string };
       2?: { takenTime?: string; location?: string; caption?: string };
@@ -674,59 +657,23 @@ router.post('/my-report/submit', authenticateOptional, requireTeacher, (req, res
 
   if (body.hasIncident !== 'Ya' && body.hasIncident !== 'Tidak') {
     res.status(400).json({
-      error: 'Sila nyatakan sama ada terdapat kejadian atau perkara yang memerlukan tindakan susulan.',
+      error: 'Sila jawab sama ada terdapat kejadian, kerosakan atau keadaan yang perlu dicatat dalam Bahagian C.',
     });
     return;
   }
 
-  const incidents = Array.isArray(body.incidents) ? body.incidents : [];
-  if (body.hasIncident === 'Ya') {
-    if (incidents.length === 0) {
-      res.status(400).json({
-        error: 'Sila lengkapkan sekurang-kurangnya satu catatan kejadian.',
-      });
-      return;
-    }
-    for (let i = 0; i < incidents.length; i++) {
-      const inc = incidents[i];
-      if (
-        !inc.time?.trim() ||
-        !inc.location?.trim() ||
-        !inc.description?.trim() ||
-        !inc.actionTaken?.trim() ||
-        !inc.notifiedParty?.trim() ||
-        !inc.followUpAction?.trim()
-      ) {
-        res.status(400).json({
-          error: `Sila lengkapkan semua ruang pada Catatan Kejadian ${i + 1}.`,
-        });
-        return;
-      }
-    }
-  }
+  const needsTentRepair = q6RequiresTentRepair(body.q6);
+  const requiresNotes = body.hasIncident === 'Ya' || needsTentRepair;
+  const trimmedNotes =
+    typeof body.observationNotes === 'string' ? body.observationNotes.trim() : '';
 
-  if (
-    !body.handoverStatus ||
-    !HANDOVER_STATUS_OPTIONS.includes(body.handoverStatus)
-  ) {
-    res.status(400).json({ error: 'Sila pilih status serahan tugas dalam Bahagian C.' });
+  if (requiresNotes && !trimmedNotes) {
+    res.status(400).json({
+      error: needsTentRepair
+        ? 'Soalan 6 menunjukkan khemah memerlukan pembaikan. Sila rekodkan lokasi khemah, kerosakan yang dilihat dan tindakan yang diambil atau masih diperlukan dalam ruangan Catatan pemerhatian.'
+        : 'Sila lengkapkan ruangan Catatan pemerhatian dalam Bahagian C.',
+    });
     return;
-  }
-
-  if (body.handoverStatus === 'Belum selesai.') {
-    if (!body.handoverNote?.trim()) {
-      res.status(400).json({
-        error: 'Sila masukkan catatan ringkas bagi status serahan "Belum selesai.".',
-      });
-      return;
-    }
-  } else {
-    if (!body.handoverReceiver?.trim() || !body.handoverTime?.trim()) {
-      res.status(400).json({
-        error: 'Sila lengkapkan nama penerima dan masa serahan dalam Bahagian C.',
-      });
-      return;
-    }
   }
 
   db.exec('BEGIN IMMEDIATE');
@@ -842,14 +789,17 @@ router.post('/my-report/submit', authenticateOptional, requireTeacher, (req, res
            q5 = ?,
            q6 = ?,
            has_incident = ?,
-           incidents_json = ?,
-           handover_status = ?,
-           handover_receiver = ?,
-           handover_time = ?,
-           handover_note = ?,
+           observation_notes = ?,
+           incidents_json = '[]',
+           handover_status = NULL,
+           handover_receiver = '',
+           handover_time = '',
+           handover_note = '',
+           form_version = 2,
            submitted_by_teacher_id = ?,
            submitted_by_name = ?,
            submitted_at = ?,
+           submission_key = COALESCE(?, submission_key),
            updated_at = ?
        WHERE id = ?`
     ).run(
@@ -862,14 +812,13 @@ router.post('/my-report/submit', authenticateOptional, requireTeacher, (req, res
       body.q5!,
       body.q6!,
       body.hasIncident!,
-      JSON.stringify(body.hasIncident === 'Ya' ? incidents : []),
-      body.handoverStatus!,
-      body.handoverStatus === 'Belum selesai.' ? '' : (body.handoverReceiver ?? '').trim(),
-      body.handoverStatus === 'Belum selesai.' ? '' : (body.handoverTime ?? '').trim(),
-      body.handoverStatus === 'Belum selesai.' ? (body.handoverNote ?? '').trim() : '',
+      requiresNotes ? trimmedNotes : '',
       req.user!.id,
       req.user!.name,
       submittedAt,
+      typeof body.submissionKey === 'string' && body.submissionKey.trim()
+        ? body.submissionKey.trim()
+        : null,
       now,
       existing.id
     );
@@ -878,7 +827,7 @@ router.post('/my-report/submit', authenticateOptional, requireTeacher, (req, res
 
     const finalReport = getReportDTO(campNight.id, check.slotNumber);
     res.json({
-      message: `Laporan Slot ${check.slotNumber} berjaya dihantar`,
+      message: 'Berjaya dihantar',
       report: finalReport,
     });
   } catch (err) {

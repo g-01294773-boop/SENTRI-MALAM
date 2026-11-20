@@ -3,6 +3,7 @@ import {
   Archive,
   ArrowRightLeft,
   Calendar,
+  CheckCheck,
   CheckCircle2,
   Cloud,
   Copy,
@@ -20,6 +21,7 @@ import {
   RefreshCw,
   RotateCcw,
   ShieldCheck,
+  Trash2,
   UserPlus,
   X,
 } from 'lucide-react';
@@ -84,7 +86,18 @@ export function PaparanPenyelarasPage({
   const [subTab, setSubTab] = useState<'dashboard' | 'slots' | 'teachers'>('dashboard');
   const [slotFilter, setSlotFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
-  const [selectedZipSlots, setSelectedZipSlots] = useState<number[]>([]);
+  const [selectedReportSlots, setSelectedReportSlots] = useState<number[]>([]);
+  const [acknowledgingSlot, setAcknowledgingSlot] = useState<number | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<{
+    mode: 'single' | 'bulk';
+    slotNumbers: number[];
+  } | null>(null);
+  const [deletingReports, setDeletingReports] = useState(false);
+  const [deleteResult, setDeleteResult] = useState<{
+    deletedCount: number;
+    deletedSlots: number[];
+    failedSlots: Array<{ slotNumber: number; error: string }>;
+  } | null>(null);
 
   // Coordinator teachers list (with personal codes)
   const [teachersList, setTeachersList] = useState<CoordinatorTeacherRow[]>([]);
@@ -121,11 +134,27 @@ export function PaparanPenyelarasPage({
   const [moveTargetSlot, setMoveTargetSlot] = useState<string>('');
   const [replacementLeaderId, setReplacementLeaderId] = useState<string>('');
 
-  // Teacher create / edit
+  // Teacher create / edit / bulk delete
   const [newTeacherName, setNewTeacherName] = useState('');
+  const [addingTeacher, setAddingTeacher] = useState(false);
   const [editingTeacherId, setEditingTeacherId] = useState<number | null>(null);
   const [editingTeacherName, setEditingTeacherName] = useState('');
   const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [teacherSearch, setTeacherSearch] = useState('');
+  const [teacherStatusFilter, setTeacherStatusFilter] = useState<
+    'all' | 'registered' | 'unregistered'
+  >('all');
+  const [selectedTeacherIds, setSelectedTeacherIds] = useState<number[]>([]);
+  const [teacherDeleteConfirm, setTeacherDeleteConfirm] = useState<{
+    mode: 'single' | 'bulk';
+    teachers: CoordinatorTeacherRow[];
+  } | null>(null);
+  const [deletingTeachers, setDeletingTeachers] = useState(false);
+  const [teacherDeleteResult, setTeacherDeleteResult] = useState<{
+    deletedCount: number;
+    deletedTeachers: Array<{ id: number; name: string }>;
+    failedTeachers: Array<{ id: number; error: string }>;
+  } | null>(null);
 
   // Report & photo viewing modals
   const [viewingReport, setViewingReport] = useState<ReportDTO | null>(null);
@@ -169,10 +198,16 @@ export function PaparanPenyelarasPage({
   const loadCoordinatorTeachers = useCallback(async () => {
     if (currentUser?.role !== 'coordinator') return;
     try {
-      const data = await apiFetch<{ teachers: CoordinatorTeacherRow[] }>(
+      const data = await apiFetch<{ teachers?: CoordinatorTeacherRow[] }>(
         `/api/coordinator/teachers?campNightId=${campNight.id}`
       );
-      setTeachersList(data.teachers);
+      setTeachersList(
+        Array.isArray(data?.teachers)
+          ? data.teachers.filter(
+              (t): t is CoordinatorTeacherRow => Boolean(t && typeof t.id === 'number')
+            )
+          : []
+      );
     } catch {
       // handled on action
     }
@@ -182,13 +217,65 @@ export function PaparanPenyelarasPage({
     void loadCoordinatorTeachers();
   }, [loadCoordinatorTeachers]);
 
+  useEffect(() => {
+    setSelectedReportSlots((prev) =>
+      prev.filter((slotNum) =>
+        slots.some((s) => s.slotNumber === slotNum && s.reportId !== null)
+      )
+    );
+  }, [slots]);
+
+  useEffect(() => {
+    setSelectedTeacherIds((prev) =>
+      prev.filter((id) => teachersList.some((t) => t.id === id))
+    );
+  }, [teachersList]);
+
+  const filteredTeachersList = useMemo(() => {
+    const q = teacherSearch.trim().toLowerCase();
+    return teachersList.filter((t) => {
+      if (q && !t.name.toLowerCase().includes(q)) {
+        return false;
+      }
+      if (teacherStatusFilter === 'registered' && t.registeredSlotNumber === null) {
+        return false;
+      }
+      if (teacherStatusFilter === 'unregistered' && t.registeredSlotNumber !== null) {
+        return false;
+      }
+      return true;
+    });
+  }, [teachersList, teacherSearch, teacherStatusFilter]);
+
+  const visibleTeacherIds = useMemo(
+    () => filteredTeachersList.map((t) => t.id),
+    [filteredTeachersList]
+  );
+
+  const allVisibleTeachersSelected = useMemo(
+    () =>
+      visibleTeacherIds.length > 0 &&
+      visibleTeacherIds.every((id) => selectedTeacherIds.includes(id)),
+    [visibleTeacherIds, selectedTeacherIds]
+  );
+
+  const selectedTeacherRows = useMemo(
+    () => teachersList.filter((t) => selectedTeacherIds.includes(t.id)),
+    [teachersList, selectedTeacherIds]
+  );
+
   const submittedSlots = useMemo(
-    () => slots.filter((s) => s.reportStatus === 'Telah dihantar'),
+    () => slots.filter((s) => s.isSubmitted),
+    [slots]
+  );
+
+  const acknowledgedSlots = useMemo(
+    () => slots.filter((s) => s.isSubmitted && Boolean(s.acknowledgedAt)),
     [slots]
   );
 
   const pendingReportSlots = useMemo(
-    () => slots.filter((s) => s.reportStatus !== 'Telah dihantar'),
+    () => slots.filter((s) => !s.isSubmitted),
     [slots]
   );
 
@@ -207,12 +294,44 @@ export function PaparanPenyelarasPage({
       if (slotFilter !== 'all' && s.slotNumber !== Number(slotFilter)) {
         return false;
       }
-      if (statusFilter !== 'all' && s.reportStatus !== statusFilter) {
-        return false;
+      if (statusFilter !== 'all') {
+        if (statusFilter === 'Telah dihantar') {
+          if (!s.isSubmitted) return false;
+        } else if (s.reportStatus !== statusFilter) {
+          return false;
+        }
       }
       return true;
     });
   }, [slots, slotFilter, statusFilter]);
+
+  const visibleSelectableSlotNumbers = useMemo(
+    () => filteredSlots.filter((s) => s.reportId !== null).map((s) => s.slotNumber),
+    [filteredSlots]
+  );
+
+  const allVisibleSelected = useMemo(
+    () =>
+      visibleSelectableSlotNumbers.length > 0 &&
+      visibleSelectableSlotNumbers.every((n) => selectedReportSlots.includes(n)),
+    [visibleSelectableSlotNumbers, selectedReportSlots]
+  );
+
+  const selectedSubmittedSlots = useMemo(
+    () =>
+      selectedReportSlots
+        .filter((n) => submittedSlots.some((s) => s.slotNumber === n))
+        .sort((a, b) => a - b),
+    [selectedReportSlots, submittedSlots]
+  );
+
+  const selectedDeletableSlots = useMemo(
+    () =>
+      selectedReportSlots
+        .filter((n) => slots.some((s) => s.slotNumber === n && s.reportId !== null))
+        .sort((a, b) => a - b),
+    [selectedReportSlots, slots]
+  );
 
   const unregisteredTeachers = useMemo(
     () => eligibleTeachers.filter((t) => t.registeredSlotNumber === null),
@@ -270,7 +389,7 @@ export function PaparanPenyelarasPage({
     e.preventDefault();
     clearAlerts();
     try {
-      const res = await apiFetch<{ message: string; campNight: CampNightDTO }>(
+      const res = await apiFetch<{ message: string; campNight?: CampNightDTO }>(
         '/api/coordinator/camp-nights',
         {
           method: 'POST',
@@ -280,11 +399,13 @@ export function PaparanPenyelarasPage({
           }),
         }
       );
-      setNotice(res.message);
+      setNotice(res.message || 'Malam perkhemahan baharu berjaya dicipta.');
       setShowNewNightForm(false);
       setNewNightDate('');
       setNewNightTitle('');
-      onSelectCampNight(res.campNight.id);
+      if (res?.campNight?.id) {
+        onSelectCampNight(res.campNight.id);
+      }
       await onRefresh();
     } catch (err) {
       setError((err as Error).message);
@@ -423,23 +544,33 @@ export function PaparanPenyelarasPage({
 
   const handleAddTeacher = async (e: FormEvent) => {
     e.preventDefault();
+    if (addingTeacher) return;
     clearAlerts();
-    if (!newTeacherName.trim()) return;
+    const trimmedName = newTeacherName.trim();
+    if (!trimmedName) {
+      setError('Sila masukkan nama penuh guru.');
+      return;
+    }
+    setAddingTeacher(true);
     try {
       const res = await apiFetch<{
-        message: string;
-        teacher: { id: number; name: string; accessCode: string };
+        message?: string;
+        teacher?: { id: number; name: string; accessCode?: string | null };
       }>('/api/coordinator/teachers', {
         method: 'POST',
-        body: JSON.stringify({ name: newTeacherName }),
+        body: JSON.stringify({ name: trimmedName }),
       });
+      const accessCode = res?.teacher?.accessCode;
+      const baseMsg = res?.message || `Guru "${trimmedName}" berjaya ditambah.`;
       setNotice(
-        `${res.message} Kod akses peribadi: ${res.teacher.accessCode}`
+        accessCode ? `${baseMsg} Kod akses peribadi: ${accessCode}` : baseMsg
       );
       setNewTeacherName('');
       await Promise.all([onRefresh(), loadCoordinatorTeachers()]);
     } catch (err) {
       setError((err as Error).message);
+    } finally {
+      setAddingTeacher(false);
     }
   };
 
@@ -464,17 +595,121 @@ export function PaparanPenyelarasPage({
   const handleResetTeacherCode = async (teacherId: number, teacherName: string) => {
     clearAlerts();
     try {
-      const res = await apiFetch<{ message: string; accessCode: string }>(
+      const res = await apiFetch<{ message?: string; accessCode?: string }>(
         `/api/coordinator/teachers/${teacherId}`,
         {
           method: 'PATCH',
           body: JSON.stringify({ resetCode: true }),
         }
       );
-      setNotice(`Kod akses baharu untuk ${teacherName}: ${res.accessCode}`);
+      setNotice(
+        res?.accessCode
+          ? `Kod akses baharu untuk ${teacherName}: ${res.accessCode}`
+          : res?.message || `Kod akses untuk ${teacherName} berjaya dikemas kini.`
+      );
       await loadCoordinatorTeachers();
     } catch (err) {
       setError((err as Error).message);
+    }
+  };
+
+  const toggleSelectTeacher = (teacherId: number, checked: boolean) => {
+    setSelectedTeacherIds((prev) => {
+      if (checked) {
+        return prev.includes(teacherId) ? prev : [...prev, teacherId];
+      }
+      return prev.filter((id) => id !== teacherId);
+    });
+  };
+
+  const handleToggleSelectAllTeachers = (checked: boolean) => {
+    if (visibleTeacherIds.length === 0) return;
+    setSelectedTeacherIds((prev) => {
+      if (checked) {
+        return Array.from(new Set([...prev, ...visibleTeacherIds]));
+      }
+      return prev.filter((id) => !visibleTeacherIds.includes(id));
+    });
+  };
+
+  const openTeacherDeleteConfirm = (
+    teachersToDelete: CoordinatorTeacherRow[],
+    mode: 'single' | 'bulk'
+  ) => {
+    clearAlerts();
+    setTeacherDeleteResult(null);
+    if (teachersToDelete.length === 0) return;
+    setTeacherDeleteConfirm({ mode, teachers: teachersToDelete });
+  };
+
+  const executeDeleteTeachers = async (
+    teacherIds: number[],
+    mode: 'single' | 'bulk'
+  ) => {
+    setDeletingTeachers(true);
+    clearAlerts();
+    try {
+      if (mode === 'single' && teacherIds.length === 1) {
+        const tId = teacherIds[0];
+        const res = await apiFetch<{
+          message: string;
+          deletedCount: number;
+          deletedIds: number[];
+          deletedTeachers: Array<{ id: number; name: string }>;
+          failedTeachers: Array<{ id: number; error: string }>;
+        }>(`/api/coordinator/teachers/${tId}`, { method: 'DELETE' });
+        setTeacherDeleteConfirm(null);
+        setTeacherDeleteResult({
+          deletedCount: res.deletedCount ?? 1,
+          deletedTeachers: res.deletedTeachers || [],
+          failedTeachers: res.failedTeachers || [],
+        });
+        setSelectedTeacherIds((prev) => prev.filter((id) => id !== tId));
+        setNotice(res.message);
+        await Promise.all([onRefresh(), loadCoordinatorTeachers()]);
+      } else {
+        const res = await apiFetch<{
+          message: string;
+          deletedCount: number;
+          deletedIds: number[];
+          deletedTeachers: Array<{ id: number; name: string }>;
+          failedTeachers: Array<{ id: number; error: string }>;
+        }>('/api/coordinator/teachers/bulk-delete', {
+          method: 'POST',
+          body: JSON.stringify({ teacherIds }),
+        });
+        setTeacherDeleteConfirm(null);
+        const deletedIds = res.deletedIds || [];
+        const failed = res.failedTeachers || [];
+        setTeacherDeleteResult({
+          deletedCount: res.deletedCount ?? deletedIds.length,
+          deletedTeachers: res.deletedTeachers || [],
+          failedTeachers: failed,
+        });
+        if (deletedIds.length > 0) {
+          setSelectedTeacherIds((prev) =>
+            prev.filter((id) => !deletedIds.includes(id))
+          );
+          await Promise.all([onRefresh(), loadCoordinatorTeachers()]);
+        }
+        if (failed.length === 0) {
+          setNotice(res.message);
+        }
+      }
+    } catch (err) {
+      setTeacherDeleteConfirm(null);
+      const errMsg =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Sambungan terganggu semasa memadam nama guru.';
+      setTeacherDeleteResult({
+        deletedCount: 0,
+        deletedTeachers: [],
+        failedTeachers: teacherIds.map((id) => ({ id, error: errMsg })),
+      });
+      setError(errMsg);
+    } finally {
+      setDeletingTeachers(false);
     }
   };
 
@@ -509,6 +744,140 @@ export function PaparanPenyelarasPage({
       await onRefresh();
     } catch (err) {
       setError((err as Error).message);
+    }
+  };
+
+  const handleAcknowledgeReport = async (slotNumber: number) => {
+    clearAlerts();
+    setAcknowledgingSlot(slotNumber);
+    try {
+      const res = await apiFetch<{ message: string; report: ReportDTO }>(
+        `/api/coordinator/reports/${slotNumber}/acknowledge`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ campNightId: campNight.id }),
+        }
+      );
+      setNotice(res.message);
+      setViewingReport((prev) =>
+        prev && prev.slotNumber === slotNumber ? res.report : prev
+      );
+      await onRefresh();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setAcknowledgingSlot(null);
+    }
+  };
+
+  const toggleSelectSlot = (slotNumber: number, checked: boolean) => {
+    setSelectedReportSlots((prev) => {
+      if (checked) {
+        return prev.includes(slotNumber) ? prev : [...prev, slotNumber];
+      }
+      return prev.filter((n) => n !== slotNumber);
+    });
+  };
+
+  const handleToggleSelectAllVisible = (checked: boolean) => {
+    if (visibleSelectableSlotNumbers.length === 0) return;
+    setSelectedReportSlots((prev) => {
+      if (checked) {
+        const merged = new Set([...prev, ...visibleSelectableSlotNumbers]);
+        return Array.from(merged).sort((a, b) => a - b);
+      }
+      return prev.filter((n) => !visibleSelectableSlotNumbers.includes(n));
+    });
+  };
+
+  const openDeleteConfirm = (slotNumbers: number[], mode: 'single' | 'bulk') => {
+    clearAlerts();
+    setDeleteResult(null);
+    const unique = Array.from(new Set(slotNumbers)).sort((a, b) => a - b);
+    if (unique.length === 0) return;
+    setDeleteConfirm({ mode, slotNumbers: unique });
+  };
+
+  const executeDeleteReports = async (
+    slotNumbers: number[],
+    mode: 'single' | 'bulk'
+  ) => {
+    setDeletingReports(true);
+    clearAlerts();
+    try {
+      if (mode === 'single' && slotNumbers.length === 1) {
+        const slotNum = slotNumbers[0];
+        const res = await apiFetch<{ message: string; deletedCount: number }>(
+          `/api/coordinator/reports/${slotNum}?campNightId=${campNight.id}`,
+          { method: 'DELETE' }
+        );
+        setDeleteConfirm(null);
+        setDeleteResult({
+          deletedCount: res.deletedCount ?? 1,
+          deletedSlots: [slotNum],
+          failedSlots: [],
+        });
+        setSelectedReportSlots((prev) => prev.filter((n) => n !== slotNum));
+        setViewingReport((prev) => (prev?.slotNumber === slotNum ? null : prev));
+        setViewingPhotosReport((prev) =>
+          prev?.slotNumber === slotNum ? null : prev
+        );
+        setNotice(res.message);
+        await onRefresh();
+      } else {
+        const res = await apiFetch<{
+          message: string;
+          deletedCount: number;
+          deletedSlots: number[];
+          failedSlots: Array<{ slotNumber: number; error: string }>;
+        }>('/api/coordinator/reports/bulk-delete', {
+          method: 'POST',
+          body: JSON.stringify({
+            campNightId: campNight.id,
+            slotNumbers,
+          }),
+        });
+        setDeleteConfirm(null);
+        const deleted = res.deletedSlots || [];
+        const failed = res.failedSlots || [];
+        setDeleteResult({
+          deletedCount: res.deletedCount ?? deleted.length,
+          deletedSlots: deleted,
+          failedSlots: failed,
+        });
+        if (deleted.length > 0) {
+          setSelectedReportSlots((prev) =>
+            prev.filter((n) => !deleted.includes(n))
+          );
+          setViewingReport((prev) =>
+            prev && deleted.includes(prev.slotNumber) ? null : prev
+          );
+          setViewingPhotosReport((prev) =>
+            prev && deleted.includes(prev.slotNumber) ? null : prev
+          );
+          await onRefresh();
+        }
+        if (failed.length === 0) {
+          setNotice(res.message);
+        }
+      }
+    } catch (err) {
+      setDeleteConfirm(null);
+      const errMsg =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Sambungan terganggu semasa memadam laporan.';
+      setDeleteResult({
+        deletedCount: 0,
+        deletedSlots: [],
+        failedSlots: slotNumbers.map((slotNumber) => ({
+          slotNumber,
+          error: errMsg,
+        })),
+      });
+      setError(errMsg);
+    } finally {
+      setDeletingReports(false);
     }
   };
 
@@ -654,7 +1023,10 @@ export function PaparanPenyelarasPage({
           <div>
             <span className="text-xs text-slate-500">Status Laporan</span>
             <p className="mt-1 text-lg font-bold text-slate-900 font-mono tabular-nums">
-              {submittedSlots.length} daripada 6 laporan telah dihantar
+              {submittedSlots.length} daripada 6 dihantar
+            </p>
+            <p className="text-xs text-emerald-700 font-medium">
+              {acknowledgedSlots.length} disahkan diterima
             </p>
           </div>
           <div>
@@ -789,7 +1161,7 @@ export function PaparanPenyelarasPage({
             </div>
           </section>
 
-          {/* Filters & Bulk ZIP Toolbar */}
+          {/* Filters & Bulk Actions Toolbar */}
           <section className="rounded-2xl border border-slate-200 bg-white p-5 space-y-4">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div>
@@ -799,10 +1171,11 @@ export function PaparanPenyelarasPage({
                 <select
                   value={campNight.id}
                   onChange={(e) => {
-                    setSelectedZipSlots([]);
+                    setSelectedReportSlots([]);
+                    setDeleteResult(null);
                     onSelectCampNight(Number(e.target.value));
                   }}
-                  className="mt-1 w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+                  className="mt-1 w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-3 py-2 text-base sm:text-sm"
                 >
                   {campNights.map((cn) => (
                     <option key={cn.id} value={cn.id}>
@@ -818,7 +1191,7 @@ export function PaparanPenyelarasPage({
                 <select
                   value={slotFilter}
                   onChange={(e) => setSlotFilter(e.target.value)}
-                  className="mt-1 w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+                  className="mt-1 w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-3 py-2 text-base sm:text-sm"
                 >
                   <option value="all">Semua Slot (1 – 6)</option>
                   {[1, 2, 3, 4, 5, 6].map((n) => (
@@ -835,37 +1208,64 @@ export function PaparanPenyelarasPage({
                 <select
                   value={statusFilter}
                   onChange={(e) => setStatusFilter(e.target.value)}
-                  className="mt-1 w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+                  className="mt-1 w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-3 py-2 text-base sm:text-sm"
                 >
                   <option value="all">Semua Status</option>
                   <option value="Belum diisi">Belum diisi</option>
                   <option value="Draf">Draf</option>
-                  <option value="Telah dihantar">Telah dihantar</option>
+                  <option value="Telah dihantar">Semua Telah Dihantar</option>
+                  <option value="Menunggu pengesahan">Menunggu pengesahan</option>
+                  <option value="Diterima oleh penyelaras">Diterima oleh penyelaras</option>
                 </select>
               </div>
             </div>
 
             <div className="space-y-3 border-t border-slate-100 pt-4">
-              <div className="text-xs text-slate-600">
-                Tandakan kotak pilihan pada slot yang sudah menghantar laporan untuk muat turun pukal PDF atau ZIP mengikut slot terpilih, atau muat turun semua laporan yang telah dihantar sekaligus.
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5">
+                <label className="inline-flex min-h-[36px] cursor-pointer items-center gap-2.5 text-xs font-semibold text-slate-800">
+                  <input
+                    type="checkbox"
+                    disabled={visibleSelectableSlotNumbers.length === 0}
+                    checked={allVisibleSelected}
+                    onChange={(e) => handleToggleSelectAllVisible(e.target.checked)}
+                    className="h-5 w-5 rounded border-slate-300 text-teal-700 disabled:opacity-40"
+                  />
+                  <span>
+                    Pilih Semua ({visibleSelectableSlotNumbers.length} laporan dipaparkan)
+                  </span>
+                </label>
+                <div className="flex flex-wrap items-center gap-3 text-xs">
+                  <span className="font-mono font-semibold text-slate-700 tabular-nums">
+                    {selectedDeletableSlots.length} laporan dipilih
+                  </span>
+                  {selectedDeletableSlots.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedReportSlots([])}
+                      className="font-semibold text-slate-600 underline hover:text-slate-900"
+                    >
+                      Kosongkan Pilihan
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-2.5">
                 <button
                   type="button"
-                  disabled={selectedZipSlots.length === 0 || exportState.generating}
+                  disabled={selectedSubmittedSlots.length === 0 || exportState.generating}
                   onClick={() =>
                     setExportConfirm({
                       format: 'pdf',
                       mode: 'selected',
-                      slotNumbers: [...selectedZipSlots].sort((a, b) => a - b),
+                      slotNumbers: selectedSubmittedSlots,
                     })
                   }
                   className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-teal-700 bg-teal-50 px-4 py-2 text-xs font-semibold text-teal-950 hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <FileText className="h-4 w-4" />
                   <span>
-                    Muat Turun PDF Pukal (Terpilih) ({selectedZipSlots.length})
+                    Muat Turun PDF Pukal (Terpilih) ({selectedSubmittedSlots.length})
                   </span>
                 </button>
 
@@ -889,19 +1289,19 @@ export function PaparanPenyelarasPage({
 
                 <button
                   type="button"
-                  disabled={selectedZipSlots.length === 0 || exportState.generating}
+                  disabled={selectedSubmittedSlots.length === 0 || exportState.generating}
                   onClick={() =>
                     setExportConfirm({
                       format: 'zip',
                       mode: 'selected',
-                      slotNumbers: [...selectedZipSlots].sort((a, b) => a - b),
+                      slotNumbers: selectedSubmittedSlots,
                     })
                   }
                   className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-900 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Archive className="h-4 w-4" />
                   <span>
-                    Muat Turun Slot Terpilih (ZIP) ({selectedZipSlots.length})
+                    Muat Turun Slot Terpilih (ZIP) ({selectedSubmittedSlots.length})
                   </span>
                 </button>
 
@@ -922,8 +1322,69 @@ export function PaparanPenyelarasPage({
                     Muat Turun Semua Laporan (ZIP) ({submittedSlots.length})
                   </span>
                 </button>
+
+                <button
+                  type="button"
+                  disabled={selectedDeletableSlots.length === 0 || deletingReports}
+                  onClick={() => openDeleteConfirm(selectedDeletableSlots, 'bulk')}
+                  className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-red-300 bg-red-50 px-4 py-2 text-xs font-semibold text-red-800 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  <span>
+                    Padam Laporan Terpilih ({selectedDeletableSlots.length})
+                  </span>
+                </button>
               </div>
             </div>
+
+            {deleteResult && (
+              <div className="space-y-2">
+                {deleteResult.deletedCount > 0 && (
+                  <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 p-3.5 text-sm font-medium text-emerald-900">
+                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-700" />
+                    <span>
+                      {deleteResult.deletedCount} laporan dan gambar lampiran berjaya dipadam (
+                      {deleteResult.deletedSlots.map((n) => `Slot ${n}`).join(', ')}).
+                    </span>
+                  </div>
+                )}
+                {deleteResult.failedSlots.length > 0 && (
+                  <div
+                    role="alert"
+                    className="flex flex-col gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-900 sm:flex-row sm:items-center sm:justify-between"
+                  >
+                    <div className="space-y-1">
+                      <p className="font-bold">
+                        Sebahagian pemadaman gagal ({deleteResult.failedSlots.length} laporan):
+                      </p>
+                      <ul className="list-disc pl-5 text-xs space-y-0.5">
+                        {deleteResult.failedSlots.map((f) => (
+                          <li key={f.slotNumber}>
+                            Slot {f.slotNumber}: {f.error}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={deletingReports}
+                      onClick={() =>
+                        void executeDeleteReports(
+                          deleteResult.failedSlots.map((f) => f.slotNumber),
+                          'bulk'
+                        )
+                      }
+                      className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-lg bg-red-700 px-4 py-2 text-xs font-semibold text-white hover:bg-red-800 disabled:opacity-60"
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      <span>
+                        {deletingReports ? 'Sedang memadam…' : 'Cuba Semula Padam Gagal'}
+                      </span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Bulk Export Progress / Result */}
             {exportState.generating && (
@@ -1064,7 +1525,16 @@ export function PaparanPenyelarasPage({
               <table className="w-full text-left text-sm">
                 <thead className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
                   <tr>
-                    <th className="px-4 py-3">Pilih</th>
+                    <th className="px-4 py-3">
+                      <input
+                        type="checkbox"
+                        disabled={visibleSelectableSlotNumbers.length === 0}
+                        checked={allVisibleSelected}
+                        aria-label="Pilih semua laporan yang dipaparkan"
+                        onChange={(e) => handleToggleSelectAllVisible(e.target.checked)}
+                        className="h-4 w-4 rounded border-slate-300 text-teal-700 disabled:opacity-40"
+                      />
+                    </th>
                     <th className="px-4 py-3">Slot &amp; Waktu</th>
                     <th className="px-4 py-3">Ketua Slot</th>
                     <th className="px-4 py-3 text-right">Petugas</th>
@@ -1077,27 +1547,23 @@ export function PaparanPenyelarasPage({
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {filteredSlots.map((s) => {
-                    const isSubmitted = s.reportStatus === 'Telah dihantar';
+                    const isSubmitted = s.isSubmitted;
                     const isDraft = s.reportStatus === 'Draf';
-                    const checked = selectedZipSlots.includes(s.slotNumber);
+                    const isAcknowledged = Boolean(s.acknowledgedAt);
+                    const hasReport = s.reportId !== null;
+                    const checked = selectedReportSlots.includes(s.slotNumber);
 
                     return (
                       <tr key={s.slotNumber} className="hover:bg-slate-50/70">
                         <td className="px-4 py-3.5">
                           <input
                             type="checkbox"
-                            disabled={!isSubmitted}
+                            disabled={!hasReport}
                             checked={checked}
-                            aria-label={`Pilih Slot ${s.slotNumber} untuk muat turun ZIP`}
-                            onChange={(e) => {
-                              if (e.target.checked) {
-                                setSelectedZipSlots((prev) => [...prev, s.slotNumber]);
-                              } else {
-                                setSelectedZipSlots((prev) =>
-                                  prev.filter((n) => n !== s.slotNumber)
-                                );
-                              }
-                            }}
+                            aria-label={`Pilih laporan Slot ${s.slotNumber}`}
+                            onChange={(e) =>
+                              toggleSelectSlot(s.slotNumber, e.target.checked)
+                            }
                             className="h-4 w-4 rounded border-slate-300 text-teal-700 disabled:opacity-30"
                           />
                         </td>
@@ -1118,18 +1584,25 @@ export function PaparanPenyelarasPage({
                           {s.registeredCount}
                           {s.quota !== null ? `/${s.quota}` : ''}
                         </td>
-                        <td className="px-4 py-3.5 font-semibold">
+                        <td className="px-4 py-3.5">
                           <span
-                            className={
-                              isSubmitted
+                            className={`font-semibold ${
+                              isAcknowledged
                                 ? 'text-emerald-700'
+                                : isSubmitted
+                                ? 'text-teal-800'
                                 : isDraft
                                 ? 'text-amber-700'
                                 : 'text-slate-500'
-                            }
+                            }`}
                           >
                             {s.reportStatus}
                           </span>
+                          {s.acknowledgedAtDisplay && (
+                            <div className="mt-0.5 font-mono text-[11px] text-slate-500 tabular-nums">
+                              Disahkan: {s.acknowledgedAtDisplay}
+                            </div>
+                          )}
                         </td>
                         <td className="px-4 py-3.5 text-right font-mono tabular-nums text-slate-800">
                           {s.photoCount}/2
@@ -1149,8 +1622,8 @@ export function PaparanPenyelarasPage({
                           {s.submittedAtDisplay || '-'}
                         </td>
                         <td className="px-4 py-3.5 text-right">
-                          <div className="inline-flex items-center gap-2">
-                            {(isSubmitted || isDraft) && (
+                          <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
+                            {hasReport && (
                               <>
                                 <button
                                   type="button"
@@ -1170,6 +1643,21 @@ export function PaparanPenyelarasPage({
                                 </button>
                               </>
                             )}
+                            {isSubmitted && !isAcknowledged && (
+                              <button
+                                type="button"
+                                disabled={acknowledgingSlot === s.slotNumber}
+                                onClick={() => void handleAcknowledgeReport(s.slotNumber)}
+                                className="inline-flex min-h-[36px] items-center gap-1 rounded-md bg-emerald-700 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-emerald-800 disabled:opacity-60 whitespace-nowrap"
+                              >
+                                <CheckCheck className="h-3.5 w-3.5" />
+                                <span>
+                                  {acknowledgingSlot === s.slotNumber
+                                    ? 'Mengesahkan...'
+                                    : 'Sahkan Penerimaan'}
+                                </span>
+                              </button>
+                            )}
                             {isSubmitted && s.reportId && (
                               <button
                                 type="button"
@@ -1180,6 +1668,16 @@ export function PaparanPenyelarasPage({
                               >
                                 <Download className="h-3.5 w-3.5" />
                                 <span>Muat Turun PDF Slot Ini</span>
+                              </button>
+                            )}
+                            {hasReport && (
+                              <button
+                                type="button"
+                                onClick={() => openDeleteConfirm([s.slotNumber], 'single')}
+                                className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-red-200 px-2.5 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50 whitespace-nowrap"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                                <span>Padam</span>
                               </button>
                             )}
                           </div>
@@ -1194,9 +1692,11 @@ export function PaparanPenyelarasPage({
             {/* Mobile cards */}
             <div className="divide-y divide-slate-200 lg:hidden">
               {filteredSlots.map((s) => {
-                const isSubmitted = s.reportStatus === 'Telah dihantar';
+                const isSubmitted = s.isSubmitted;
                 const isDraft = s.reportStatus === 'Draf';
-                const checked = selectedZipSlots.includes(s.slotNumber);
+                const isAcknowledged = Boolean(s.acknowledgedAt);
+                const hasReport = s.reportId !== null;
+                const checked = selectedReportSlots.includes(s.slotNumber);
 
                 return (
                   <div key={s.slotNumber} className="p-4 space-y-3">
@@ -1204,18 +1704,12 @@ export function PaparanPenyelarasPage({
                       <div className="flex items-start gap-3">
                         <input
                           type="checkbox"
-                          disabled={!isSubmitted}
+                          disabled={!hasReport}
                           checked={checked}
-                          aria-label={`Pilih Slot ${s.slotNumber}`}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setSelectedZipSlots((prev) => [...prev, s.slotNumber]);
-                            } else {
-                              setSelectedZipSlots((prev) =>
-                                prev.filter((n) => n !== s.slotNumber)
-                              );
-                            }
-                          }}
+                          aria-label={`Pilih laporan Slot ${s.slotNumber}`}
+                          onChange={(e) =>
+                            toggleSelectSlot(s.slotNumber, e.target.checked)
+                          }
                           className="mt-1 h-5 w-5 rounded border-slate-300 text-teal-700 disabled:opacity-30"
                         />
                         <div>
@@ -1228,9 +1722,11 @@ export function PaparanPenyelarasPage({
                         </div>
                       </div>
                       <span
-                        className={`text-xs font-bold ${
-                          isSubmitted
+                        className={`text-xs font-bold text-right ${
+                          isAcknowledged
                             ? 'text-emerald-700'
+                            : isSubmitted
+                            ? 'text-teal-800'
                             : isDraft
                             ? 'text-amber-700'
                             : 'text-slate-500'
@@ -1245,14 +1741,17 @@ export function PaparanPenyelarasPage({
                       <span>Gambar: {s.photoCount}/2</span>
                       <span>Susulan: {s.followUpStatus}</span>
                       {s.submittedAtDisplay && <span>Hantar: {s.submittedAtDisplay}</span>}
+                      {s.acknowledgedAtDisplay && (
+                        <span>Disahkan: {s.acknowledgedAtDisplay}</span>
+                      )}
                     </div>
 
-                    {(isSubmitted || isDraft) && (
+                    {hasReport && (
                       <div className="flex flex-wrap gap-2 pt-1">
                         <button
                           type="button"
                           onClick={() => handleOpenReportModal(s.slotNumber, 'report')}
-                          className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-800"
+                          className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-800"
                         >
                           <Eye className="h-3.5 w-3.5" />
                           <span>Lihat Laporan</span>
@@ -1260,21 +1759,44 @@ export function PaparanPenyelarasPage({
                         <button
                           type="button"
                           onClick={() => handleOpenReportModal(s.slotNumber, 'photos')}
-                          className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-800"
+                          className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-800"
                         >
                           <ImageIcon className="h-3.5 w-3.5" />
                           <span>Lihat Gambar</span>
                         </button>
+                        {isSubmitted && !isAcknowledged && (
+                          <button
+                            type="button"
+                            disabled={acknowledgingSlot === s.slotNumber}
+                            onClick={() => void handleAcknowledgeReport(s.slotNumber)}
+                            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg bg-emerald-700 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-800 disabled:opacity-60"
+                          >
+                            <CheckCheck className="h-3.5 w-3.5" />
+                            <span>
+                              {acknowledgingSlot === s.slotNumber
+                                ? 'Mengesahkan...'
+                                : 'Sahkan Penerimaan'}
+                            </span>
+                          </button>
+                        )}
                         {isSubmitted && s.reportId && (
                           <button
                             type="button"
                             onClick={() => handleDownloadSlotPdf(s.reportId!, s.slotNumber)}
-                            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-semibold text-white"
+                            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg bg-teal-700 px-3 py-2 text-xs font-semibold text-white"
                           >
                             <Download className="h-3.5 w-3.5" />
                             <span>Muat Turun PDF Slot Ini</span>
                           </button>
                         )}
+                        <button
+                          type="button"
+                          onClick={() => openDeleteConfirm([s.slotNumber], 'single')}
+                          className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-800"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          <span>Padam</span>
+                        </button>
                       </div>
                     )}
                   </div>
@@ -1573,113 +2095,276 @@ export function PaparanPenyelarasPage({
                 onChange={(e) => setNewTeacherName(e.target.value)}
                 placeholder="Nama penuh guru baharu"
                 required
-                className="flex-1 min-h-[44px] rounded-lg border border-slate-300 px-3.5 py-2 text-sm"
+                className="flex-1 min-h-[44px] rounded-lg border border-slate-300 px-3.5 py-2 text-base sm:text-sm"
               />
               <button
                 type="submit"
-                className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-lg bg-teal-700 px-5 py-2 text-sm font-semibold text-white hover:bg-teal-800"
+                disabled={addingTeacher || !newTeacherName.trim()}
+                className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-lg bg-teal-700 px-5 py-2 text-sm font-semibold text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 <UserPlus className="h-4 w-4" />
-                <span>Tambah Guru</span>
+                <span>{addingTeacher ? 'Menambah...' : 'Tambah Guru'}</span>
               </button>
             </form>
           </section>
 
           <section className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
-            <div className="border-b border-slate-100 px-5 py-4">
-              <h2 className="text-base font-bold text-slate-900">
-                Senarai Guru &amp; Kod Akses Peribadi ({teachersList.length} orang)
-              </h2>
-              <p className="mt-0.5 text-xs text-slate-500">
-                Edarkan kod akses peribadi kepada guru masing-masing bagi tujuan pengesahan identiti.
-              </p>
+            <div className="border-b border-slate-100 px-5 py-4 space-y-4">
+              <div>
+                <h2 className="text-base font-bold text-slate-900">
+                  Senarai Guru &amp; Kod Akses Peribadi ({teachersList.length} orang)
+                </h2>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Edarkan kod akses peribadi kepada guru masing-masing atau pilih beberapa nama guru untuk dipadamkan secara pukal daripada sistem.
+                </p>
+              </div>
+
+              {/* Search, filter & bulk delete toolbar */}
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <input
+                  type="search"
+                  value={teacherSearch}
+                  onChange={(e) => setTeacherSearch(e.target.value)}
+                  placeholder="Cari nama guru..."
+                  aria-label="Cari nama guru"
+                  className="w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-base sm:text-sm"
+                />
+                <select
+                  value={teacherStatusFilter}
+                  onChange={(e) =>
+                    setTeacherStatusFilter(
+                      e.target.value as 'all' | 'registered' | 'unregistered'
+                    )
+                  }
+                  aria-label="Tapis status pendaftaran guru"
+                  className="w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-3 py-2 text-base sm:text-sm"
+                >
+                  <option value="all">Semua Guru ({teachersList.length})</option>
+                  <option value="registered">Sudah Berdaftar Dalam Slot</option>
+                  <option value="unregistered">Belum Berdaftar</option>
+                </select>
+              </div>
+
+              <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex flex-wrap items-center gap-3">
+                  <label className="inline-flex min-h-[36px] cursor-pointer items-center gap-2.5 text-xs font-semibold text-slate-800">
+                    <input
+                      type="checkbox"
+                      disabled={visibleTeacherIds.length === 0}
+                      checked={allVisibleTeachersSelected}
+                      onChange={(e) =>
+                        handleToggleSelectAllTeachers(e.target.checked)
+                      }
+                      className="h-5 w-5 rounded border-slate-300 text-teal-700 disabled:opacity-40"
+                    />
+                    <span>
+                      Pilih Semua ({visibleTeacherIds.length} guru dipaparkan)
+                    </span>
+                  </label>
+                  <span className="font-mono text-xs font-semibold text-slate-700 tabular-nums">
+                    {selectedTeacherRows.length} guru dipilih
+                  </span>
+                  {selectedTeacherRows.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedTeacherIds([])}
+                      className="text-xs font-semibold text-slate-600 underline hover:text-slate-900"
+                    >
+                      Kosongkan Pilihan
+                    </button>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  disabled={selectedTeacherRows.length === 0 || deletingTeachers}
+                  onClick={() =>
+                    openTeacherDeleteConfirm(selectedTeacherRows, 'bulk')
+                  }
+                  className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-lg border border-red-300 bg-red-50 px-4 py-2 text-xs font-semibold text-red-800 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  <span>
+                    Padam Guru Terpilih ({selectedTeacherRows.length})
+                  </span>
+                </button>
+              </div>
+
+              {teacherDeleteResult && (
+                <div className="space-y-2">
+                  {teacherDeleteResult.deletedCount > 0 && (
+                    <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 p-3.5 text-sm font-medium text-emerald-900">
+                      <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-700" />
+                      <span>
+                        {teacherDeleteResult.deletedCount} nama guru berjaya dipadam daripada sistem.
+                      </span>
+                    </div>
+                  )}
+                  {teacherDeleteResult.failedTeachers.length > 0 && (
+                    <div
+                      role="alert"
+                      className="flex flex-col gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-900 sm:flex-row sm:items-center sm:justify-between"
+                    >
+                      <div className="space-y-1">
+                        <p className="font-bold">
+                          Sebahagian pemadaman guru gagal ({teacherDeleteResult.failedTeachers.length} guru):
+                        </p>
+                        <ul className="list-disc pl-5 text-xs space-y-0.5">
+                          {teacherDeleteResult.failedTeachers.map((f) => (
+                            <li key={f.id}>
+                              ID {f.id}: {f.error}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={deletingTeachers}
+                        onClick={() =>
+                          void executeDeleteTeachers(
+                            teacherDeleteResult.failedTeachers.map((f) => f.id),
+                            'bulk'
+                          )
+                        }
+                        className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-lg bg-red-700 px-4 py-2 text-xs font-semibold text-white hover:bg-red-800 disabled:opacity-60"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        <span>
+                          {deletingTeachers
+                            ? 'Sedang memadam…'
+                            : 'Cuba Semula Padam Gagal'}
+                        </span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="divide-y divide-slate-100">
-              {teachersList.map((t) => (
-                <div
-                  key={t.id}
-                  className="flex flex-col gap-3 px-5 py-3.5 sm:flex-row sm:items-center sm:justify-between"
-                >
-                  <div className="min-w-0 flex-1">
-                    {editingTeacherId === t.id ? (
-                      <div className="flex flex-wrap items-center gap-2">
-                        <input
-                          type="text"
-                          value={editingTeacherName}
-                          onChange={(e) => setEditingTeacherName(e.target.value)}
-                          className="min-h-[38px] flex-1 rounded-lg border border-slate-300 px-3 py-1 text-sm"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => handleSaveTeacherSpelling(t.id)}
-                          className="min-h-[38px] rounded-lg bg-teal-700 px-3 py-1 text-xs font-semibold text-white"
-                        >
-                          Simpan
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setEditingTeacherId(null)}
-                          className="min-h-[38px] rounded-lg border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700"
-                        >
-                          Batal
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2">
-                        <span className="font-semibold text-slate-900">{t.name}</span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEditingTeacherId(t.id);
-                            setEditingTeacherName(t.name);
-                          }}
-                          className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-900"
-                          title="Betulkan ejaan nama"
-                        >
-                          <Edit3 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    )}
-                    <p className="mt-0.5 text-xs text-slate-500">
-                      {t.registeredSlotNumber
-                        ? `Slot ${t.registeredSlotNumber}${t.isLeader ? ' · Ketua Slot' : ' · Petugas'}`
-                        : 'Belum berdaftar dalam slot'}
-                    </p>
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-2 shrink-0">
-                    <div className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 font-mono text-xs text-slate-900">
-                      <KeyRound className="h-3.5 w-3.5 text-slate-400" />
-                      <span>{t.accessCode || '—'}</span>
-                    </div>
-
-                    {t.accessCode && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard?.writeText(t.accessCode!);
-                          setCopiedId(t.id);
-                          setTimeout(() => setCopiedId(null), 1500);
-                        }}
-                        className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
-                      >
-                        <Copy className="h-3.5 w-3.5" />
-                        <span>{copiedId === t.id ? 'Disalin' : 'Salin'}</span>
-                      </button>
-                    )}
-
-                    <button
-                      type="button"
-                      onClick={() => handleResetTeacherCode(t.id, t.name)}
-                      className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
-                    >
-                      <RefreshCw className="h-3.5 w-3.5" />
-                      <span>Jana Semula</span>
-                    </button>
-                  </div>
+              {filteredTeachersList.length === 0 ? (
+                <div className="px-5 py-8 text-center text-sm text-slate-500">
+                  Tiada nama guru sepadan dengan carian atau penapis semasa.
                 </div>
-              ))}
+              ) : (
+                filteredTeachersList.map((t) => {
+                  const isSelected = selectedTeacherIds.includes(t.id);
+                  return (
+                    <div
+                      key={t.id}
+                      className={`flex flex-col gap-3 px-5 py-3.5 sm:flex-row sm:items-center sm:justify-between ${
+                        isSelected ? 'bg-red-50/40' : ''
+                      }`}
+                    >
+                      <div className="flex min-w-0 flex-1 items-start gap-3">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          aria-label={`Pilih ${t.name} untuk dipadam`}
+                          onChange={(e) =>
+                            toggleSelectTeacher(t.id, e.target.checked)
+                          }
+                          className="mt-1 h-5 w-5 shrink-0 rounded border-slate-300 text-teal-700"
+                        />
+                        <div className="min-w-0 flex-1">
+                          {editingTeacherId === t.id ? (
+                            <div className="flex flex-wrap items-center gap-2">
+                              <input
+                                type="text"
+                                value={editingTeacherName}
+                                onChange={(e) =>
+                                  setEditingTeacherName(e.target.value)
+                                }
+                                className="min-h-[38px] flex-1 rounded-lg border border-slate-300 px-3 py-1 text-base sm:text-sm"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => handleSaveTeacherSpelling(t.id)}
+                                className="min-h-[38px] rounded-lg bg-teal-700 px-3 py-1 text-xs font-semibold text-white"
+                              >
+                                Simpan
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEditingTeacherId(null)}
+                                className="min-h-[38px] rounded-lg border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700"
+                              >
+                                Batal
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2">
+                              <span className="font-semibold text-slate-900">
+                                {t.name}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingTeacherId(t.id);
+                                  setEditingTeacherName(t.name);
+                                }}
+                                className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-900"
+                                title="Betulkan ejaan nama"
+                              >
+                                <Edit3 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          )}
+                          <p className="mt-0.5 text-xs text-slate-500">
+                            {t.registeredSlotNumber
+                              ? `Slot ${t.registeredSlotNumber}${
+                                  t.isLeader ? ' · Ketua Slot' : ' · Petugas'
+                                }`
+                              : 'Belum berdaftar dalam slot'}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 shrink-0 pl-8 sm:pl-0">
+                        <div className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 font-mono text-xs text-slate-900">
+                          <KeyRound className="h-3.5 w-3.5 text-slate-400" />
+                          <span>{t.accessCode || '—'}</span>
+                        </div>
+
+                        {t.accessCode && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard?.writeText(t.accessCode!);
+                              setCopiedId(t.id);
+                              setTimeout(() => setCopiedId(null), 1500);
+                            }}
+                            className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                            <span>{copiedId === t.id ? 'Disalin' : 'Salin'}</span>
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => handleResetTeacherCode(t.id, t.name)}
+                          className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                        >
+                          <RefreshCw className="h-3.5 w-3.5" />
+                          <span>Jana Semula</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openTeacherDeleteConfirm([t], 'single')
+                          }
+                          className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-semibold text-red-700 hover:bg-red-100"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          <span>Padam</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
           </section>
         </div>
@@ -1893,6 +2578,79 @@ export function PaparanPenyelarasPage({
         </div>
       )}
 
+      {/* MODAL: Confirm Delete Reports */}
+      {deleteConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-confirm-title"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-100 text-red-700">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div>
+                <h2
+                  id="delete-confirm-title"
+                  className="text-lg font-bold text-slate-900"
+                >
+                  Sahkan Pemadaman Laporan
+                </h2>
+                <p className="mt-1 text-sm text-slate-600">
+                  Anda pasti mahu memadam laporan yang dipilih?
+                </p>
+              </div>
+            </div>
+
+            <dl className="mt-4 space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm">
+              <div>
+                <dt className="text-xs text-slate-500">Bilangan Laporan Dipilih</dt>
+                <dd className="font-mono font-bold text-slate-900 tabular-nums">
+                  {deleteConfirm.slotNumbers.length} laporan
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs text-slate-500">Senarai Slot Terlibat</dt>
+                <dd className="font-semibold text-slate-900">
+                  {deleteConfirm.slotNumbers.map((n) => `Slot ${n}`).join(', ')}
+                </dd>
+              </div>
+            </dl>
+
+            <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3.5 text-xs text-red-900 leading-relaxed">
+              <strong>Amaran:</strong> Semua gambar lampiran yang berkait dengan laporan ini juga akan dipadam secara kekal daripada pangkalan data dan storan pelayan. Jadual slot dan senarai guru berdaftar dikekalkan.
+            </div>
+
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                type="button"
+                disabled={deletingReports}
+                onClick={() => setDeleteConfirm(null)}
+                className="min-h-[44px] rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={deletingReports}
+                onClick={() =>
+                  void executeDeleteReports(
+                    deleteConfirm.slotNumbers,
+                    deleteConfirm.mode
+                  )
+                }
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-lg bg-red-700 px-5 py-2 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-60"
+              >
+                <Trash2 className="h-4 w-4" />
+                <span>{deletingReports ? 'Sedang memadam…' : 'Sahkan Padam'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* MODAL: View Full Report */}
       {viewingReport && (
         <div
@@ -1907,13 +2665,42 @@ export function PaparanPenyelarasPage({
                   Laporan Pemantauan — Slot {viewingReport.slotNumber}
                 </h2>
                 <p className="text-xs text-slate-600 font-mono tabular-nums">
-                  Status: {viewingReport.status === 'submitted' ? 'Telah dihantar' : 'Draf'}
+                  Status:{' '}
+                  {viewingReport.status === 'submitted'
+                    ? viewingReport.acknowledgedAt
+                      ? 'Diterima oleh penyelaras'
+                      : 'Menunggu pengesahan'
+                    : 'Draf'}
                   {viewingReport.submittedAtDisplay
                     ? ` · Dihantar: ${viewingReport.submittedAtDisplay}`
                     : ''}
                 </p>
+                {viewingReport.acknowledgedAtDisplay && (
+                  <p className="mt-0.5 text-xs font-medium text-emerald-700 font-mono tabular-nums">
+                    Disahkan pada {viewingReport.acknowledgedAtDisplay} oleh{' '}
+                    {viewingReport.acknowledgedByName || 'Penyelaras'}
+                  </p>
+                )}
               </div>
               <div className="flex flex-wrap items-center gap-2">
+                {viewingReport.status === 'submitted' &&
+                  !viewingReport.acknowledgedAt && (
+                    <button
+                      type="button"
+                      disabled={acknowledgingSlot === viewingReport.slotNumber}
+                      onClick={() =>
+                        void handleAcknowledgeReport(viewingReport.slotNumber)
+                      }
+                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg bg-emerald-700 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-800 disabled:opacity-60"
+                    >
+                      <CheckCheck className="h-3.5 w-3.5" />
+                      <span>
+                        {acknowledgingSlot === viewingReport.slotNumber
+                          ? 'Mengesahkan...'
+                          : 'Sahkan Penerimaan'}
+                      </span>
+                    </button>
+                  )}
                 {viewingReport.status === 'submitted' && (
                   <button
                     type="button"
@@ -1925,24 +2712,36 @@ export function PaparanPenyelarasPage({
                   </button>
                 )}
                 {viewingReport.id && (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleDownloadSlotPdf(
-                        viewingReport.id!,
-                        viewingReport.slotNumber,
-                        viewingReport.status !== 'submitted'
-                      )
-                    }
-                    className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg bg-teal-700 px-3.5 py-2 text-xs font-semibold text-white hover:bg-teal-800"
-                  >
-                    <Download className="h-3.5 w-3.5" />
-                    <span>
-                      {viewingReport.status === 'submitted'
-                        ? 'Muat Turun PDF Slot Ini'
-                        : 'Muat Turun Draf PDF'}
-                    </span>
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleDownloadSlotPdf(
+                          viewingReport.id!,
+                          viewingReport.slotNumber,
+                          viewingReport.status !== 'submitted'
+                        )
+                      }
+                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg bg-teal-700 px-3.5 py-2 text-xs font-semibold text-white hover:bg-teal-800"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      <span>
+                        {viewingReport.status === 'submitted'
+                          ? 'Muat Turun PDF Slot Ini'
+                          : 'Muat Turun Draf PDF'}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        openDeleteConfirm([viewingReport.slotNumber], 'single')
+                      }
+                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2 text-xs font-semibold text-red-800 hover:bg-red-100"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      <span>Padam</span>
+                    </button>
+                  </>
                 )}
                 <button
                   type="button"
@@ -2020,6 +2819,90 @@ export function PaparanPenyelarasPage({
                   </div>
                 );
               })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Confirm Delete Teachers */}
+      {teacherDeleteConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-teacher-confirm-title"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-100 text-red-700">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div>
+                <h2
+                  id="delete-teacher-confirm-title"
+                  className="text-lg font-bold text-slate-900"
+                >
+                  Sahkan Pemadaman Nama Guru
+                </h2>
+                <p className="mt-1 text-sm text-slate-600">
+                  Anda pasti mahu memadam guru yang dipilih daripada sistem?
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm">
+              <div>
+                <span className="text-xs text-slate-500">Bilangan Guru Dipilih</span>
+                <p className="font-mono font-bold text-slate-900 tabular-nums">
+                  {teacherDeleteConfirm.teachers.length} orang guru
+                </p>
+              </div>
+              <div>
+                <span className="text-xs text-slate-500">Senarai Nama Guru</span>
+                <ul className="mt-1 max-h-44 space-y-1 overflow-y-auto text-xs text-slate-800">
+                  {teacherDeleteConfirm.teachers.map((t) => (
+                    <li key={t.id} className="font-medium">
+                      • {t.name}
+                      {t.registeredSlotNumber
+                        ? ` (Slot ${t.registeredSlotNumber}${
+                            t.isLeader ? ' · Ketua Slot' : ''
+                          })`
+                        : ''}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+
+            <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3.5 text-xs text-red-900 leading-relaxed">
+              <strong>Amaran:</strong> Nama guru yang dipadam tidak lagi boleh log masuk atau mendaftar. Pendaftaran slot sedia ada mereka akan digugurkan secara automatik, dan jawatan Ketua Slot akan dikosongkan sekiranya terlibat. Laporan yang telah dihantar dikekalkan.
+            </div>
+
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                type="button"
+                disabled={deletingTeachers}
+                onClick={() => setTeacherDeleteConfirm(null)}
+                className="min-h-[44px] rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={deletingTeachers}
+                onClick={() =>
+                  void executeDeleteTeachers(
+                    teacherDeleteConfirm.teachers.map((t) => t.id),
+                    teacherDeleteConfirm.mode
+                  )
+                }
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-lg bg-red-700 px-5 py-2 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-60"
+              >
+                <Trash2 className="h-4 w-4" />
+                <span>
+                  {deletingTeachers ? 'Sedang memadam…' : 'Sahkan Padam Guru'}
+                </span>
+              </button>
             </div>
           </div>
         </div>

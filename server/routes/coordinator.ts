@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { Router } from 'express';
 import { authenticateOptional, requireCoordinator } from '../auth.ts';
 import {
@@ -7,6 +9,7 @@ import {
   encryptAccessCode,
   generatePersonalAccessCode,
   hashAccessCode,
+  UPLOADS_DIR,
 } from '../db.ts';
 import { generateBulkPdfBuffer } from '../pdf.ts';
 import {
@@ -131,8 +134,11 @@ router.post('/camp-nights', (req, res) => {
 });
 
 router.post('/teachers', (req, res) => {
-  const { name } = req.body as { name?: string };
-  const trimmed = (name || '').trim();
+  const rawName =
+    req.body && typeof req.body === 'object'
+      ? (req.body as { name?: unknown }).name
+      : undefined;
+  const trimmed = typeof rawName === 'string' ? rawName.trim() : '';
   if (!trimmed) {
     res.status(400).json({ error: 'Sila masukkan nama penuh guru.' });
     return;
@@ -147,22 +153,36 @@ router.post('/teachers', (req, res) => {
     return;
   }
 
-  const personalCode = generatePersonalAccessCode();
-  const insertRes = db
-    .prepare(
-      `INSERT INTO users (name, role, access_code_hash, access_code_enc, active, created_at)
-       VALUES (?, 'teacher', ?, ?, 1, ?)`
-    )
-    .run(trimmed, hashAccessCode(personalCode), encryptAccessCode(personalCode), new Date().toISOString());
+  try {
+    const personalCode = generatePersonalAccessCode();
+    const insertRes = db
+      .prepare(
+        `INSERT INTO users (name, role, access_code_hash, access_code_enc, active, created_at)
+         VALUES (?, 'teacher', ?, ?, 1, ?)`
+      )
+      .run(
+        trimmed,
+        hashAccessCode(personalCode),
+        encryptAccessCode(personalCode),
+        new Date().toISOString()
+      );
 
-  res.status(201).json({
-    message: `Guru "${trimmed}" berjaya ditambah.`,
-    teacher: {
-      id: Number(insertRes.lastInsertRowid),
-      name: trimmed,
-      accessCode: personalCode,
-    },
-  });
+    res.status(201).json({
+      message: `Guru "${trimmed}" berjaya ditambah.`,
+      teacher: {
+        id: Number(insertRes.lastInsertRowid),
+        name: trimmed,
+        accessCode: personalCode,
+      },
+    });
+  } catch (err) {
+    const msg = (err as Error).message || '';
+    if (msg.includes('UNIQUE')) {
+      res.status(409).json({ error: `Nama "${trimmed}" telah pun wujud dalam senarai guru.` });
+      return;
+    }
+    res.status(500).json({ error: `Gagal menambah guru: ${msg}` });
+  }
 });
 
 router.patch('/teachers/:id', (req, res) => {
@@ -209,6 +229,100 @@ router.patch('/teachers/:id', (req, res) => {
       ? 'Kod akses peribadi baharu berjaya dijana.'
       : 'Maklumat guru berjaya dikemas kini.',
     accessCode: newCode,
+  });
+});
+
+function deleteTeacherById(
+  teacherId: number
+):
+  | { ok: true; id: number; name: string }
+  | { ok: false; status: number; error: string } {
+  if (!Number.isInteger(teacherId) || teacherId <= 0) {
+    return { ok: false, status: 400, error: `ID guru (${teacherId}) tidak sah.` };
+  }
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const user = db
+      .prepare('SELECT id, name, role FROM users WHERE id = ?')
+      .get(teacherId) as { id: number; name: string; role: string } | undefined;
+
+    if (!user) {
+      db.exec('ROLLBACK');
+      return { ok: false, status: 404, error: `Guru (ID ${teacherId}) tidak ditemui.` };
+    }
+
+    if (user.role !== 'teacher') {
+      db.exec('ROLLBACK');
+      return { ok: false, status: 403, error: 'Akaun Penyelaras tidak boleh dipadam.' };
+    }
+
+    db.prepare("DELETE FROM users WHERE id = ? AND role = 'teacher'").run(teacherId);
+    db.exec('COMMIT');
+    return { ok: true, id: user.id, name: user.name };
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // ignore
+    }
+    return {
+      ok: false,
+      status: 500,
+      error: `Gagal memadam guru (ID ${teacherId}): ${(err as Error).message}`,
+    };
+  }
+}
+
+router.delete('/teachers/:id', (req, res) => {
+  const teacherId = Number(req.params.id);
+  const result = deleteTeacherById(teacherId);
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error });
+    return;
+  }
+
+  res.json({
+    message: `Guru "${result.name}" berjaya dipadam daripada sistem.`,
+    deletedCount: 1,
+    deletedIds: [result.id],
+    deletedTeachers: [{ id: result.id, name: result.name }],
+    failedTeachers: [],
+  });
+});
+
+router.post('/teachers/bulk-delete', (req, res) => {
+  const { teacherIds } = req.body as { teacherIds?: unknown };
+
+  if (!Array.isArray(teacherIds) || teacherIds.length === 0) {
+    res.status(400).json({ error: 'Sila pilih sekurang-kurangnya seorang guru untuk dipadam.' });
+    return;
+  }
+
+  const uniqueIds = [...new Set(teacherIds.map(Number))];
+  const deletedTeachers: Array<{ id: number; name: string }> = [];
+  const failedTeachers: Array<{ id: number; error: string }> = [];
+
+  for (const id of uniqueIds) {
+    const result = deleteTeacherById(id);
+    if (result.ok) {
+      deletedTeachers.push({ id: result.id, name: result.name });
+    } else {
+      failedTeachers.push({ id, error: result.error });
+    }
+  }
+
+  const message =
+    failedTeachers.length === 0
+      ? `${deletedTeachers.length} nama guru berjaya dipadam daripada sistem.`
+      : `${deletedTeachers.length} guru berjaya dipadam, tetapi ${failedTeachers.length} guru gagal dipadam.`;
+
+  res.json({
+    message,
+    deletedCount: deletedTeachers.length,
+    deletedIds: deletedTeachers.map((t) => t.id),
+    deletedTeachers,
+    failedTeachers,
   });
 });
 
@@ -576,6 +690,176 @@ router.get('/reports/:slotNumber', (req, res) => {
   res.json({ report });
 });
 
+router.post('/reports/:slotNumber/acknowledge', (req, res) => {
+  const slotNumber = Number(req.params.slotNumber);
+  if (!Number.isInteger(slotNumber) || slotNumber < 1 || slotNumber > 6) {
+    res.status(400).json({ error: 'Nombor slot tidak sah.' });
+    return;
+  }
+
+  const { campNightId } = req.body as { campNightId?: number };
+  const campNight = getCampNightById(campNightId);
+  if (!campNight) {
+    res.status(404).json({ error: 'Malam perkhemahan tidak ditemui.' });
+    return;
+  }
+
+  const existing = db
+    .prepare(
+      'SELECT id, status, acknowledged_at FROM reports WHERE camp_night_id = ? AND slot_number = ?'
+    )
+    .get(campNight.id, slotNumber) as
+    | { id: number; status: 'draft' | 'submitted'; acknowledged_at: string | null }
+    | undefined;
+
+  if (!existing || existing.status !== 'submitted') {
+    res.status(400).json({
+      error: 'Hanya laporan yang telah dihantar oleh Ketua Slot boleh disahkan penerimaannya.',
+    });
+    return;
+  }
+
+  if (!existing.acknowledged_at) {
+    const now = new Date().toISOString();
+    db.prepare(
+      `UPDATE reports
+       SET acknowledged_by_teacher_id = ?,
+           acknowledged_by_name = ?,
+           acknowledged_at = ?,
+           updated_at = ?
+       WHERE id = ?`
+    ).run(req.user!.id, req.user!.name, now, now, existing.id);
+  }
+
+  const updatedReport = getReportDTO(campNight.id, slotNumber);
+  res.json({
+    message: `Penerimaan Laporan Slot ${slotNumber} telah disahkan (${updatedReport.acknowledgedAtDisplay ?? ''}).`,
+    report: updatedReport,
+    ...getScheduleForCampNight(campNight.id),
+  });
+});
+
+function deleteSlotReportWithPhotos(
+  campNightId: number,
+  slotNumber: number
+): { ok: true; deletedPhotoCount: number } | { ok: false; error: string } {
+  if (!Number.isInteger(slotNumber) || slotNumber < 1 || slotNumber > 6) {
+    return { ok: false, error: `Nombor slot (${slotNumber}) tidak sah.` };
+  }
+
+  let fileNames: string[] = [];
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const rep = db
+      .prepare('SELECT id FROM reports WHERE camp_night_id = ? AND slot_number = ?')
+      .get(campNightId, slotNumber) as { id: number } | undefined;
+
+    if (!rep) {
+      db.exec('ROLLBACK');
+      return { ok: false, error: `Tiada laporan ditemui bagi Slot ${slotNumber}.` };
+    }
+
+    const photoRows = db
+      .prepare('SELECT file_name FROM report_photos WHERE report_id = ?')
+      .all(rep.id) as Array<{ file_name: string }>;
+    fileNames = photoRows.map((p) => p.file_name);
+
+    db.prepare('DELETE FROM reports WHERE id = ?').run(rep.id);
+    db.exec('COMMIT');
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // ignore
+    }
+    return {
+      ok: false,
+      error: `Gagal memadam Laporan Slot ${slotNumber}: ${(err as Error).message}`,
+    };
+  }
+
+  for (const fn of fileNames) {
+    const filePath = path.join(UPLOADS_DIR, fn);
+    if (fs.existsSync(filePath)) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        // ignore best-effort disk cleanup after DB commit
+      }
+    }
+  }
+
+  return { ok: true, deletedPhotoCount: fileNames.length };
+}
+
+router.delete('/reports/:slotNumber', (req, res) => {
+  const slotNumber = Number(req.params.slotNumber);
+  const rawCampId = req.body?.campNightId ?? req.query?.campNightId;
+  const campNight = getCampNightById(rawCampId ? Number(rawCampId) : undefined);
+  if (!campNight) {
+    res.status(404).json({ error: 'Malam perkhemahan tidak ditemui.' });
+    return;
+  }
+
+  const result = deleteSlotReportWithPhotos(campNight.id, slotNumber);
+  if (!result.ok) {
+    res.status(404).json({ error: result.error });
+    return;
+  }
+
+  res.json({
+    message: `Laporan Slot ${slotNumber} bersama gambar lampirannya berjaya dipadam.`,
+    deletedCount: 1,
+    deletedSlots: [slotNumber],
+    failedSlots: [],
+    ...getScheduleForCampNight(campNight.id),
+  });
+});
+
+router.post('/reports/bulk-delete', (req, res) => {
+  const { campNightId, slotNumbers } = req.body as {
+    campNightId?: number;
+    slotNumbers?: number[];
+  };
+
+  const campNight = getCampNightById(campNightId);
+  if (!campNight) {
+    res.status(404).json({ error: 'Malam perkhemahan tidak ditemui.' });
+    return;
+  }
+
+  if (!Array.isArray(slotNumbers) || slotNumbers.length === 0) {
+    res.status(400).json({ error: 'Sila pilih sekurang-kurangnya satu laporan untuk dipadam.' });
+    return;
+  }
+
+  const uniqueSlots = [...new Set(slotNumbers.map(Number))].sort((a, b) => a - b);
+  const deletedSlots: number[] = [];
+  const failedSlots: Array<{ slotNumber: number; error: string }> = [];
+
+  for (const sNum of uniqueSlots) {
+    const r = deleteSlotReportWithPhotos(campNight.id, sNum);
+    if (r.ok) {
+      deletedSlots.push(sNum);
+    } else {
+      failedSlots.push({ slotNumber: sNum, error: r.error });
+    }
+  }
+
+  const message =
+    failedSlots.length === 0
+      ? `${deletedSlots.length} laporan berjaya dipadam bersama gambar lampirannya.`
+      : `${deletedSlots.length} laporan berjaya dipadam, tetapi ${failedSlots.length} laporan gagal dipadam.`;
+
+  res.json({
+    message,
+    deletedCount: deletedSlots.length,
+    deletedSlots,
+    failedSlots,
+    ...getScheduleForCampNight(campNight.id),
+  });
+});
+
 router.post('/reports/:slotNumber/reopen', (req, res) => {
   const slotNumber = Number(req.params.slotNumber);
   const { campNightId } = req.body as { campNightId?: number };
@@ -597,7 +881,12 @@ router.post('/reports/:slotNumber/reopen', (req, res) => {
   const now = new Date().toISOString();
   db.prepare(
     `UPDATE reports
-     SET status = 'draft', reopened_at = ?, updated_at = ?
+     SET status = 'draft',
+         reopened_at = ?,
+         acknowledged_by_teacher_id = NULL,
+         acknowledged_by_name = NULL,
+         acknowledged_at = NULL,
+         updated_at = ?
      WHERE id = ?`
   ).run(now, now, existing.id);
 
@@ -667,7 +956,7 @@ router.post('/export-pdf', async (req, res) => {
 
   if (targetSlots.length === 0) {
     res.status(400).json({
-      error: 'Tiada laporan berstatus "Telah dihantar" yang dipilih untuk dimuat turun sebagai PDF pukal.',
+      error: 'Tiada laporan yang telah dihantar dipilih untuk dimuat turun sebagai PDF pukal.',
     });
     return;
   }

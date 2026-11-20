@@ -3,7 +3,8 @@ import path from 'node:path';
 import PDFDocument from 'pdfkit';
 import sharp from 'sharp';
 import {
-  MONITORING_QUESTIONS,
+  getMonitoringQuestionsForReport,
+  q6RequiresTentRepair,
   type CampNightDTO,
   type ReportDTO,
 } from '../src/shared/constants.ts';
@@ -195,6 +196,14 @@ function renderSlotReportIntoDoc(
   if (report.submittedAtDisplay) {
     metaRows.push(['Tarikh & Masa Penghantaran', report.submittedAtDisplay]);
   }
+  if (report.status === 'submitted') {
+    metaRows.push([
+      'Status Penerimaan Penyelaras',
+      report.acknowledgedAtDisplay
+        ? `Diterima oleh penyelaras (${report.acknowledgedAtDisplay})`
+        : 'Menunggu pengesahan penyelaras',
+    ]);
+  }
   if (report.updatedAtDisplay && report.reopenedAt) {
     metaRows.push(['Masa Kemas Kini Terakhir', report.updatedAtDisplay]);
   }
@@ -362,8 +371,10 @@ function renderSlotReportIntoDoc(
 
   doc.y = bHeadY + 22;
 
-  for (let i = 0; i < MONITORING_QUESTIONS.length; i++) {
-    const q = MONITORING_QUESTIONS[i];
+  const questionsForReport = getMonitoringQuestionsForReport(report);
+
+  for (let i = 0; i < questionsForReport.length; i++) {
+    const q = questionsForReport[i];
     const ans = report[q.key] || 'Tidak dijawab';
 
     doc.font(fonts.regular).fontSize(11);
@@ -402,44 +413,37 @@ function renderSlotReportIntoDoc(
 
   doc.y += 14;
 
-  // BAHAGIAN C — CATATAN KEJADIAN DAN SERAHAN TUGAS
+  // BAHAGIAN C — CATATAN HASIL PEMANTAUAN
   drawSectionHeader(
     doc,
     fonts,
-    'BAHAGIAN C — CATATAN KEJADIAN DAN SERAHAN TUGAS',
+    'BAHAGIAN C — CATATAN HASIL PEMANTAUAN',
     contentWidth
   );
 
   const incidentAnswer = report.hasIncident || '-';
   const cRows: Array<[string, string]> = [
-    ['Kejadian Memerlukan Tindakan Susulan?', incidentAnswer],
+    [
+      'Adakah terdapat kejadian, kerosakan atau keadaan yang perlu dicatat sepanjang slot bertugas?',
+      incidentAnswer,
+    ],
   ];
-
-  cRows.push(['Status Serahan Tugas', report.handoverStatus || '-']);
-  if (report.handoverStatus === 'Belum selesai.') {
-    cRows.push(['Catatan Ringkas Serahan', report.handoverNote || '-']);
-  } else if (report.handoverStatus) {
-    const receiverLabel =
-      report.slotNumber === 6
-        ? 'Penyelaras Penerima Laporan Akhir'
-        : 'Penerima Daripada Slot Berikutnya';
-    cRows.push([receiverLabel, report.handoverReceiver || '-']);
-    cRows.push(['Masa Serahan', report.handoverTime || '-']);
-  }
 
   for (const [k, v] of cRows) {
     doc.font(fonts.regular).fontSize(11);
-    const kH = doc.heightOfString(k, { width: labelColW - 14, lineGap: LINE_GAP });
-    const vH = doc.heightOfString(v, { width: valColW - 16, lineGap: LINE_GAP });
+    const kH = doc.heightOfString(k, { width: labelColW + 45 - 14, lineGap: LINE_GAP });
+    const vH = doc.heightOfString(v, { width: valColW - 45 - 16, lineGap: LINE_GAP });
     const rowH = Math.max(26, Math.max(kH, vH) + 10);
     ensureSpace(doc, rowH);
     const rY = doc.y;
+    const cLabelW = labelColW + 45;
+    const cValW = contentWidth - cLabelW;
 
     doc
       .save()
-      .rect(left, rY, labelColW, rowH)
+      .rect(left, rY, cLabelW, rowH)
       .fillAndStroke('#F8FAFC', '#CBD5E1')
-      .rect(left + labelColW, rY, valColW, rowH)
+      .rect(left + cLabelW, rY, cValW, rowH)
       .fillAndStroke('#FFFFFF', '#CBD5E1')
       .restore();
 
@@ -447,14 +451,14 @@ function renderSlotReportIntoDoc(
       .font(fonts.bold)
       .fontSize(11)
       .fillColor('#000000')
-      .text(k, left + 8, rY + 6, { width: labelColW - 14, lineGap: LINE_GAP });
+      .text(k, left + 8, rY + 6, { width: cLabelW - 14, lineGap: LINE_GAP });
 
     doc
       .font(fonts.regular)
       .fontSize(11)
       .fillColor('#000000')
-      .text(v, left + labelColW + 8, rY + 6, {
-        width: valColW - 16,
+      .text(v, left + cLabelW + 8, rY + 6, {
+        width: cValW - 16,
         lineGap: LINE_GAP,
       });
 
@@ -462,7 +466,51 @@ function renderSlotReportIntoDoc(
     doc.y = rY + rowH;
   }
 
-  if (report.hasIncident === 'Ya' && report.incidents.length > 0) {
+  const trimmedNotes = (report.observationNotes || '').trim();
+  if (
+    trimmedNotes ||
+    report.hasIncident === 'Ya' ||
+    q6RequiresTentRepair(report.q6)
+  ) {
+    doc.y += 8;
+    const notesText = trimmedNotes || '-';
+    doc.font(fonts.regular).fontSize(11);
+    const bodyH = doc.heightOfString(notesText, {
+      width: contentWidth - 20,
+      lineGap: LINE_GAP,
+    });
+    const boxH = Math.max(46, bodyH + 34);
+
+    ensureSpace(doc, boxH);
+    const bY = doc.y;
+    doc
+      .save()
+      .rect(left, bY, contentWidth, boxH)
+      .fillAndStroke('#FFFBEB', '#F59E0B')
+      .restore();
+
+    doc
+      .font(fonts.bold)
+      .fontSize(11)
+      .fillColor('#000000')
+      .text('Catatan Pemerhatian', left + 10, bY + 7, {
+        width: contentWidth - 20,
+      });
+
+    doc
+      .font(fonts.regular)
+      .fontSize(11)
+      .fillColor('#000000')
+      .text(notesText, left + 10, bY + 24, {
+        width: contentWidth - 20,
+        lineGap: LINE_GAP,
+      });
+
+    doc.x = left;
+    doc.y = bY + boxH + 8;
+  }
+
+  if (report.incidents.length > 0) {
     doc.y += 8;
     report.incidents.forEach((inc, idx) => {
       const lines = [
@@ -715,7 +763,10 @@ function renderSummarySectionIntoDoc(
         : `${r.startDateDisplay} hingga ${r.endDateDisplay}`;
 
     const followUpNotes: string[] = [];
-    if (r.hasIncident === 'Ya' && r.incidents.length > 0) {
+    if (r.observationNotes?.trim()) {
+      followUpNotes.push(`Catatan pemerhatian: ${r.observationNotes.trim()}`);
+    }
+    if (r.incidents.length > 0) {
       r.incidents.forEach((inc, idx) => {
         followUpNotes.push(
           `Kejadian ${idx + 1} (${inc.time || '-'}, ${inc.location || '-'}): ${
@@ -724,10 +775,9 @@ function renderSummarySectionIntoDoc(
         );
       });
     }
-    if (r.handoverStatus === 'Belum selesai.' && r.handoverNote.trim()) {
-      followUpNotes.push(`Serahan belum selesai: ${r.handoverNote.trim()}`);
-    }
-    if (
+    if (r.q6 === 'Terdapat khemah yang masih memerlukan pembaikan pada akhir slot') {
+      followUpNotes.push(`Keadaan khemah: ${r.q6}`);
+    } else if (
       r.q6 === 'Sebahagian masih memerlukan tindakan' ||
       r.q6 === 'Semua masih memerlukan tindakan'
     ) {
@@ -738,8 +788,7 @@ function renderSummarySectionIntoDoc(
       `Tarikh & Waktu Bertugas: ${dateSpan} (${r.displayTime})`,
       `Ketua Slot: ${r.submittedByName || r.leaderName || '-'}`,
       `Masa Penghantaran: ${r.submittedAtDisplay || '-'}`,
-      `Status Serahan: ${r.handoverStatus || '-'}`,
-      `Perkara Tindakan Lanjut: ${
+      `Catatan / Tindakan Lanjut: ${
         followUpNotes.length === 0
           ? 'Tiada perkara yang memerlukan tindakan lanjut.'
           : '\n• ' + followUpNotes.join('\n• ')

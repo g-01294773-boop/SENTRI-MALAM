@@ -98,7 +98,7 @@ export const MONITORING_QUESTIONS: MonitoringQuestion[] = [
   {
     key: 'q3',
     number: 3,
-    prompt: '3. Bagaimanakah pencahayaan di laluan antara khemah dengan tandas?',
+    prompt: '3. Bagaimanakah pencahayaan di laluan antara kawasan khemah dengan tandas?',
     options: [
       'Sangat gelap',
       'Gelap',
@@ -107,6 +107,58 @@ export const MONITORING_QUESTIONS: MonitoringQuestion[] = [
       'Sangat terang',
       'Tidak diperiksa',
     ],
+  },
+  {
+    key: 'q4',
+    number: 4,
+    prompt: '4. Apakah keadaan laluan yang diperiksa semasa rondaan?',
+    options: [
+      'Semua laluan yang diperiksa bebas daripada halangan',
+      'Terdapat halangan, tetapi semua laluan masih boleh digunakan',
+      'Sekurang-kurangnya satu laluan terhalang sepenuhnya',
+      'Tidak diperiksa',
+    ],
+  },
+  {
+    key: 'q5',
+    number: 5,
+    prompt: '5. Berapa banyak kawasan yang ditetapkan untuk rondaan telah diperiksa?',
+    options: [
+      'Tiada',
+      'Kurang daripada separuh',
+      'Separuh',
+      'Lebih daripada separuh tetapi belum semuanya',
+      'Semua kawasan',
+    ],
+  },
+  {
+    key: 'q6',
+    number: 6,
+    prompt: '6. Apakah keadaan khemah peserta yang diperhatikan semasa rondaan?',
+    options: [
+      'Semua khemah yang diperiksa berada dalam keadaan baik',
+      'Terdapat khemah yang memerlukan pembaikan dan semua pembaikan telah selesai',
+      'Terdapat khemah yang masih memerlukan pembaikan pada akhir slot',
+      'Keadaan khemah tidak diperiksa',
+    ],
+  },
+];
+
+export const LEGACY_Q6_OPTIONS = [
+  'Tiada permintaan diterima',
+  'Semua permintaan telah ditangani',
+  'Sebahagian masih memerlukan tindakan',
+  'Semua masih memerlukan tindakan',
+] as const;
+
+export const LEGACY_MONITORING_QUESTIONS: MonitoringQuestion[] = [
+  MONITORING_QUESTIONS[0],
+  MONITORING_QUESTIONS[1],
+  {
+    key: 'q3',
+    number: 3,
+    prompt: '3. Bagaimanakah pencahayaan di laluan antara khemah dengan tandas?',
+    options: MONITORING_QUESTIONS[2].options,
   },
   {
     key: 'q4',
@@ -123,34 +175,43 @@ export const MONITORING_QUESTIONS: MonitoringQuestion[] = [
     key: 'q5',
     number: 5,
     prompt: '5. Berapa banyakkah kawasan yang ditetapkan telah diperiksa oleh kumpulan?',
-    options: [
-      'Tiada',
-      'Kurang daripada separuh',
-      'Separuh',
-      'Lebih daripada separuh tetapi belum semuanya',
-      'Semua kawasan',
-    ],
+    options: MONITORING_QUESTIONS[4].options,
   },
   {
     key: 'q6',
     number: 6,
     prompt: '6. Apakah status permintaan bantuan daripada peserta pada akhir slot?',
-    options: [
-      'Tiada permintaan diterima',
-      'Semua permintaan telah ditangani',
-      'Sebahagian masih memerlukan tindakan',
-      'Semua masih memerlukan tindakan',
-    ],
+    options: [...LEGACY_Q6_OPTIONS],
   },
 ];
 
-export const HANDOVER_STATUS_OPTIONS = [
-  'Selesai tanpa perkara berbangkit.',
-  'Selesai dengan perkara untuk tindakan susulan.',
-  'Belum selesai.',
+export const TENT_REPAIR_Q6_OPTIONS = [
+  'Terdapat khemah yang memerlukan pembaikan dan semua pembaikan telah selesai',
+  'Terdapat khemah yang masih memerlukan pembaikan pada akhir slot',
 ] as const;
 
-export type HandoverStatus = (typeof HANDOVER_STATUS_OPTIONS)[number];
+export function q6RequiresTentRepair(q6: string | null | undefined): boolean {
+  if (!q6) return false;
+  return (TENT_REPAIR_Q6_OPTIONS as readonly string[]).includes(q6);
+}
+
+export function isLegacyReport(
+  report: Pick<ReportDTO, 'formVersion' | 'q6' | 'status'>
+): boolean {
+  if (report.q6 && (LEGACY_Q6_OPTIONS as readonly string[]).includes(report.q6)) {
+    return true;
+  }
+  if (report.status === 'submitted' && report.formVersion === 1) {
+    return true;
+  }
+  return false;
+}
+
+export function getMonitoringQuestionsForReport(
+  report: Pick<ReportDTO, 'formVersion' | 'q6' | 'status'>
+): MonitoringQuestion[] {
+  return isLegacyReport(report) ? LEGACY_MONITORING_QUESTIONS : MONITORING_QUESTIONS;
+}
 
 export interface PublicTeacherSlotMember {
   teacherId: number;
@@ -177,13 +238,23 @@ export interface SlotSummaryDTO {
   leaderTeacherId: number | null;
   leaderName: string | null;
   members: PublicTeacherSlotMember[];
-  reportStatus: 'Belum diisi' | 'Draf' | 'Telah dihantar';
+  reportStatus:
+    | 'Belum diisi'
+    | 'Draf'
+    | 'Menunggu pengesahan'
+    | 'Diterima oleh penyelaras';
+  isSubmitted: boolean;
   reportId: number | null;
   photoCount: number;
   followUpStatus: string;
   submittedAt: string | null;
   submittedAtDisplay: string | null;
   submittedByName: string | null;
+  acknowledgedAt: string | null;
+  acknowledgedAtDisplay: string | null;
+  acknowledgedByName: string | null;
+  acknowledgementDateStr: string | null;
+  acknowledgementTimeStr: string | null;
   updatedAt: string | null;
 }
 
@@ -242,6 +313,7 @@ export interface ReportPhotoDTO {
 
 export interface ReportDTO {
   id: number | null;
+  formVersion: number;
   campNightId: number;
   campNightTitle: string;
   campStartDate: string;
@@ -255,7 +327,6 @@ export interface ReportDTO {
   leaderTeacherId: number | null;
   leaderName: string | null;
   registeredMembers: PublicTeacherSlotMember[];
-  nextSlotMembers: string[];
   status: 'unfilled' | 'draft' | 'submitted';
   attendance: AttendanceEntry[];
   extraOfficers: string;
@@ -266,15 +337,18 @@ export interface ReportDTO {
   q5: string | null;
   q6: string | null;
   hasIncident: 'Ya' | 'Tidak' | null;
+  observationNotes: string;
   incidents: IncidentEntry[];
-  handoverStatus: HandoverStatus | null;
-  handoverReceiver: string;
-  handoverTime: string;
-  handoverNote: string;
   submittedByTeacherId: number | null;
   submittedByName: string | null;
   submittedAt: string | null;
   submittedAtDisplay: string | null;
+  acknowledgedByTeacherId: number | null;
+  acknowledgedByName: string | null;
+  acknowledgedAt: string | null;
+  acknowledgedAtDisplay: string | null;
+  acknowledgementDateStr: string | null;
+  acknowledgementTimeStr: string | null;
   updatedAt: string | null;
   updatedAtDisplay: string | null;
   reopenedAt: string | null;

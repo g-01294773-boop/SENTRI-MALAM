@@ -2,7 +2,6 @@ import { GoogleGenAI, Type } from '@google/genai';
 import sharp from 'sharp';
 import {
   MONITORING_QUESTIONS,
-  type IncidentEntry,
 } from '../src/shared/constants.ts';
 
 export interface GeneratedPhotoObservation {
@@ -18,9 +17,8 @@ export interface ExtractedReportInfo {
   q5: string;
   q6: string;
   hasIncident: 'Ya' | 'Tidak' | '';
-  incidents: IncidentEntry[];
+  observationNotes: string;
   extraOfficers: string;
-  handoverNote: string;
   observationSummary: string;
 }
 
@@ -143,10 +141,10 @@ Panduan pemetaan soalan Bahagian B (pilih HANYA daripada "Pilihan sah" atau pula
 ${questionGuide}
 
 Peraturan:
-- Jika gambar mengandungi teks catatan/jadual/borang contoh pelaporan, ekstrak jawapan dan butiran kejadian serta catatan serahan mengikut maklumat dalam gambar tersebut.
+- Jika gambar mengandungi teks catatan/jadual/borang contoh pelaporan, ekstrak jawapan dan catatan pemerhatian mengikut maklumat dalam gambar tersebut.
 - Jika gambar ialah foto lokasi/pemantauan tapak perkhemahan, isi hanya medan yang dapat dinilai secara objektif daripada gambar (contohnya pencahayaan atau keadaan laluan/khemah) dan biarkan medan yang tidak kelihatan sebagai "".
-- "hasIncident": Pulangkan "Ya" jika terdapat kejadian/masalah yang memerlukan tindakan susulan dalam gambar, "Tidak" jika tiada kejadian dilaporkan secara jelas, atau "" jika tidak pasti.
-- "incidents": Senarai kejadian jika hasIncident ialah "Ya", selain itu pulangkan [].
+- "hasIncident": Pulangkan "Ya" jika terdapat kejadian, kerosakan atau keadaan yang perlu dicatat dalam gambar, "Tidak" jika tiada kejadian/kerosakan dilaporkan secara jelas, atau "" jika tidak pasti.
+- "observationNotes": Catatan pemerhatian (perkara diperhatikan, masa, lokasi, kerosakan khemah dan tindakan diambil/diperlukan) jika hasIncident ialah "Ya" atau terdapat kerosakan khemah; selain itu pulangkan "".
 - "observationSummary": Ringkasan 1-2 ayat dalam Bahasa Melayu tentang maklumat yang berjaya dikenal pasti daripada gambar.`;
 
   const response = await ai.models.generateContent({
@@ -176,30 +174,8 @@ Peraturan:
           q5: { type: Type.STRING },
           q6: { type: Type.STRING },
           hasIncident: { type: Type.STRING },
-          incidents: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                time: { type: Type.STRING },
-                location: { type: Type.STRING },
-                description: { type: Type.STRING },
-                actionTaken: { type: Type.STRING },
-                notifiedParty: { type: Type.STRING },
-                followUpAction: { type: Type.STRING },
-              },
-              required: [
-                'time',
-                'location',
-                'description',
-                'actionTaken',
-                'notifiedParty',
-                'followUpAction',
-              ],
-            },
-          },
+          observationNotes: { type: Type.STRING },
           extraOfficers: { type: Type.STRING },
-          handoverNote: { type: Type.STRING },
           observationSummary: { type: Type.STRING },
         },
         required: [
@@ -210,9 +186,8 @@ Peraturan:
           'q5',
           'q6',
           'hasIncident',
-          'incidents',
+          'observationNotes',
           'extraOfficers',
-          'handoverNote',
           'observationSummary',
         ],
       },
@@ -243,20 +218,6 @@ Peraturan:
       ? parsed.hasIncident
       : '';
 
-  const incidents: IncidentEntry[] =
-    hasIncident === 'Ya' && Array.isArray(parsed.incidents)
-      ? parsed.incidents
-          .filter((item) => item && typeof item === 'object')
-          .map((item) => ({
-            time: String(item.time ?? '').trim(),
-            location: String(item.location ?? '').trim(),
-            description: String(item.description ?? '').trim(),
-            actionTaken: String(item.actionTaken ?? '').trim(),
-            notifiedParty: String(item.notifiedParty ?? '').trim(),
-            followUpAction: String(item.followUpAction ?? '').trim(),
-          }))
-      : [];
-
   return {
     q1: pickValidOption('q1', parsed.q1),
     q2: pickValidOption('q2', parsed.q2),
@@ -265,9 +226,9 @@ Peraturan:
     q5: pickValidOption('q5', parsed.q5),
     q6: pickValidOption('q6', parsed.q6),
     hasIncident,
-    incidents,
+    observationNotes:
+      typeof parsed.observationNotes === 'string' ? parsed.observationNotes.trim() : '',
     extraOfficers: typeof parsed.extraOfficers === 'string' ? parsed.extraOfficers.trim() : '',
-    handoverNote: typeof parsed.handoverNote === 'string' ? parsed.handoverNote.trim() : '',
     observationSummary:
       typeof parsed.observationSummary === 'string' && parsed.observationSummary.trim()
         ? parsed.observationSummary.trim()

@@ -90,7 +90,9 @@ void testConnection();
 function mapReportStatus(
   status: SlotSummaryDTO['reportStatus']
 ): 'not_started' | 'draft' | 'submitted' {
-  if (status === 'Telah dihantar') return 'submitted';
+  if (status === 'Menunggu pengesahan' || status === 'Diterima oleh penyelaras') {
+    return 'submitted';
+  }
   if (status === 'Draf') return 'draft';
   return 'not_started';
 }

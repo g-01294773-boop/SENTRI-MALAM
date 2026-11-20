@@ -1,6 +1,7 @@
 import heic2any from 'heic2any';
 import {
   AlertCircle,
+  Bell,
   Camera,
   Check,
   CheckCircle2,
@@ -10,15 +11,20 @@ import {
   FileText,
   Image as ImageIcon,
   Lock,
-  Plus,
   RefreshCw,
   Save,
   Send,
-  Trash2,
   UploadCloud,
   Wand2,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+} from 'react';
 import { ProtectedImage } from '../components/ProtectedImage';
 import {
   ApiError,
@@ -28,12 +34,12 @@ import {
   uploadPhotoWithProgress,
 } from '../lib/api';
 import {
-  HANDOVER_STATUS_OPTIONS,
+  getMonitoringQuestionsForReport,
   LEADER_INSTRUCTION,
   MONITORING_QUESTIONS,
+  q6RequiresTentRepair,
   type AttendanceEntry,
   type AuthUserDTO,
-  type HandoverStatus,
   type IncidentEntry,
   type ReportDTO,
 } from '../shared/constants';
@@ -88,14 +94,44 @@ function getCurrentTimeLabelMY(): string {
   return `${h12}.${min} ${period}`;
 }
 
-const emptyIncident = (): IncidentEntry => ({
-  time: '',
-  location: '',
-  description: '',
-  actionTaken: '',
-  notifiedParty: '',
-  followUpAction: '',
-});
+const LEGACY_Q4_REMAP: Record<string, string> = {
+  'Semua laluan bebas daripada halangan':
+    'Semua laluan yang diperiksa bebas daripada halangan',
+  'Terdapat halangan tetapi laluan masih boleh digunakan':
+    'Terdapat halangan, tetapi semua laluan masih boleh digunakan',
+  'Terdapat laluan yang terhalang sepenuhnya':
+    'Sekurang-kurangnya satu laluan terhalang sepenuhnya',
+};
+
+function sanitizeDraftOption(
+  key: 'q1' | 'q2' | 'q3' | 'q4' | 'q5' | 'q6',
+  value: string | null
+): string | null {
+  if (!value) return null;
+  const qDef = MONITORING_QUESTIONS.find((q) => q.key === key);
+  if (!qDef) return null;
+  if (qDef.options.includes(value)) return value;
+  if (key === 'q4' && LEGACY_Q4_REMAP[value]) {
+    return LEGACY_Q4_REMAP[value];
+  }
+  return null;
+}
+
+function formatLegacyIncidentsToNotes(incidents: IncidentEntry[]): string {
+  return incidents
+    .map((inc, idx) => {
+      const parts = [
+        inc.description && `Perkara: ${inc.description}`,
+        inc.time && `Masa: ${inc.time}`,
+        inc.location && `Lokasi: ${inc.location}`,
+        inc.actionTaken && `Tindakan diambil: ${inc.actionTaken}`,
+        inc.followUpAction && `Tindakan diperlukan: ${inc.followUpAction}`,
+      ].filter(Boolean);
+      return parts.length > 0 ? `Catatan ${idx + 1}: ${parts.join(' | ')}` : '';
+    })
+    .filter(Boolean)
+    .join('\n');
+}
 
 const initialPhotoState = (): PhotoSlotState => ({
   uploading: false,
@@ -130,11 +166,8 @@ export function LaporanSlotSayaPage({
   const [q5, setQ5] = useState<string | null>(null);
   const [q6, setQ6] = useState<string | null>(null);
   const [hasIncident, setHasIncident] = useState<'Ya' | 'Tidak' | null>(null);
-  const [incidents, setIncidents] = useState<IncidentEntry[]>([]);
-  const [handoverStatus, setHandoverStatus] = useState<HandoverStatus | null>(null);
-  const [handoverReceiver, setHandoverReceiver] = useState('');
-  const [handoverTime, setHandoverTime] = useState('');
-  const [handoverNote, setHandoverNote] = useState('');
+  const [observationNotes, setObservationNotes] = useState('');
+  const [showValidationErrors, setShowValidationErrors] = useState(false);
 
   const [photo1State, setPhoto1State] = useState<PhotoSlotState>(initialPhotoState);
   const [photo2State, setPhoto2State] = useState<PhotoSlotState>(initialPhotoState);
@@ -142,41 +175,65 @@ export function LaporanSlotSayaPage({
   const [isReviewMode, setIsReviewMode] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
   const [submittingReport, setSubmittingReport] = useState(false);
+  const [submitFailed, setSubmitFailed] = useState(false);
+  const [missingItems, setMissingItems] = useState<string[]>([]);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [extractingFromImage, setExtractingFromImage] = useState(false);
   const [extractNotice, setExtractNotice] = useState<string | null>(null);
   const [extractError, setExtractError] = useState<string | null>(null);
+  const [ackNotification, setAckNotification] = useState<string | null>(null);
+
+  const submissionKeyRef = useRef<string | null>(null);
 
   const hydrateFormFromReport = useCallback((r: ReportDTO) => {
     setReport(r);
     setAttendance(r.attendance);
     setExtraOfficers(r.extraOfficers);
-    setQ1(r.q1);
-    setQ2(r.q2);
-    setQ3(r.q3);
-    setQ4(r.q4);
-    setQ5(r.q5);
-    setQ6(r.q6);
+    if (r.status === 'submitted') {
+      setQ1(r.q1);
+      setQ2(r.q2);
+      setQ3(r.q3);
+      setQ4(r.q4);
+      setQ5(r.q5);
+      setQ6(r.q6);
+    } else {
+      setQ1(sanitizeDraftOption('q1', r.q1));
+      setQ2(sanitizeDraftOption('q2', r.q2));
+      setQ3(sanitizeDraftOption('q3', r.q3));
+      setQ4(sanitizeDraftOption('q4', r.q4));
+      setQ5(sanitizeDraftOption('q5', r.q5));
+      setQ6(sanitizeDraftOption('q6', r.q6));
+    }
     setHasIncident(r.hasIncident);
-    setIncidents(r.incidents.length > 0 ? r.incidents : []);
-    setHandoverStatus(r.handoverStatus);
-    setHandoverReceiver(r.handoverReceiver);
-    setHandoverTime(r.handoverTime);
-    setHandoverNote(r.handoverNote);
+    const legacyNotes =
+      r.incidents.length > 0 ? formatLegacyIncidentsToNotes(r.incidents) : '';
+    setObservationNotes(r.observationNotes || legacyNotes);
+    setShowValidationErrors(false);
     setPhoto1State((prev) => ({
       ...prev,
-      takenTime: r.photos[1]?.takenTime ?? prev.takenTime,
-      location: r.photos[1]?.location ?? prev.location,
-      caption: r.photos[1]?.caption ?? prev.caption,
+      error: r.status === 'unfilled' ? null : prev.error,
+      observationNotice: r.status === 'unfilled' ? null : prev.observationNotice,
+      takenTime: r.photos[1]?.takenTime ?? (r.status === 'unfilled' ? '' : prev.takenTime),
+      location: r.photos[1]?.location ?? (r.status === 'unfilled' ? '' : prev.location),
+      caption: r.photos[1]?.caption ?? (r.status === 'unfilled' ? '' : prev.caption),
     }));
     setPhoto2State((prev) => ({
       ...prev,
-      takenTime: r.photos[2]?.takenTime ?? prev.takenTime,
-      location: r.photos[2]?.location ?? prev.location,
-      caption: r.photos[2]?.caption ?? prev.caption,
+      error: r.status === 'unfilled' ? null : prev.error,
+      observationNotice: r.status === 'unfilled' ? null : prev.observationNotice,
+      takenTime: r.photos[2]?.takenTime ?? (r.status === 'unfilled' ? '' : prev.takenTime),
+      location: r.photos[2]?.location ?? (r.status === 'unfilled' ? '' : prev.location),
+      caption: r.photos[2]?.caption ?? (r.status === 'unfilled' ? '' : prev.caption),
     }));
+    if (r.status === 'submitted' && r.acknowledgedAt && r.acknowledgementDateStr && r.acknowledgementTimeStr) {
+      setAckNotification(
+        `Laporan Slot ${r.slotNumber} telah diterima oleh penyelaras pada ${r.acknowledgementDateStr}, ${r.acknowledgementTimeStr}.`
+      );
+    } else {
+      setAckNotification(null);
+    }
   }, []);
 
   const userId = currentUser?.id ?? null;
@@ -190,6 +247,8 @@ export function LaporanSlotSayaPage({
     }
     setLoading(true);
     setAccessError(null);
+    setSubmitFailed(false);
+    setMissingItems([]);
     try {
       const data = await apiFetch<{ report: ReportDTO }>(
         `/api/my-report?campNightId=${campNightId}`
@@ -208,31 +267,68 @@ export function LaporanSlotSayaPage({
     void loadMyReport();
   }, [loadMyReport]);
 
+  const silentRefreshReportStatus = useCallback(async () => {
+    if (!userId || userRole !== 'teacher') return;
+    try {
+      const data = await apiFetch<{ report: ReportDTO }>(
+        `/api/my-report?campNightId=${campNightId}`
+      );
+      const next = data.report;
+      setReport((prev) => {
+        if (!prev) return next;
+        // If report was acknowledged, deleted, or status changed on server, sync cleanly
+        if (
+          prev.status !== next.status ||
+          prev.acknowledgedAt !== next.acknowledgedAt ||
+          prev.id !== next.id
+        ) {
+          if (next.status === 'unfilled' && prev.status !== 'unfilled') {
+            hydrateFormFromReport(next);
+            setIsReviewMode(false);
+          } else if (next.status === 'submitted') {
+            hydrateFormFromReport(next);
+          } else {
+            return { ...prev, acknowledgedAt: next.acknowledgedAt, acknowledgedAtDisplay: next.acknowledgedAtDisplay };
+          }
+          return next;
+        }
+        return prev;
+      });
+    } catch {
+      // ignore silent polling errors
+    }
+  }, [campNightId, userId, userRole, hydrateFormFromReport]);
+
+  useEffect(() => {
+    if (!userId || userRole !== 'teacher') return;
+    const intervalMs = report?.status === 'submitted' && !report.acknowledgedAt ? 8000 : 15000;
+    const timer = window.setInterval(() => {
+      void silentRefreshReportStatus();
+    }, intervalMs);
+    const onFocusOrVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void silentRefreshReportStatus();
+      }
+    };
+    window.addEventListener('focus', onFocusOrVisible);
+    document.addEventListener('visibilitychange', onFocusOrVisible);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocusOrVisible);
+      document.removeEventListener('visibilitychange', onFocusOrVisible);
+    };
+  }, [userId, userRole, report?.status, report?.acknowledgedAt, silentRefreshReportStatus]);
+
   // Section completion summary for neat guidance
   const completionStats = useMemo(() => {
     const secA = attendance.some((a) => a.present);
     const answeredCount = [q1, q2, q3, q4, q5, q6].filter(Boolean).length;
     const secB = answeredCount === 6;
-    const secCIncidentOk =
-      hasIncident === 'Tidak' ||
-      (hasIncident === 'Ya' &&
-        incidents.length > 0 &&
-        incidents.every(
-          (i) =>
-            i.time.trim() &&
-            i.location.trim() &&
-            i.description.trim() &&
-            i.actionTaken.trim() &&
-            i.notifiedParty.trim() &&
-            i.followUpAction.trim()
-        ));
-    const secCHandoverOk =
-      handoverStatus === 'Belum selesai.'
-        ? Boolean(handoverNote.trim())
-        : Boolean(
-            handoverStatus && handoverReceiver.trim() && handoverTime.trim()
-          );
-    const secC = secCIncidentOk && secCHandoverOk;
+    const q6RequiresRepair = q6RequiresTentRepair(q6);
+    const requiresObservationNotes = hasIncident === 'Ya' || q6RequiresRepair;
+    const secC =
+      (hasIncident === 'Ya' || hasIncident === 'Tidak') &&
+      (!requiresObservationNotes || observationNotes.trim().length > 0);
 
     const p1Ready = Boolean(
       report?.photos[1] &&
@@ -249,7 +345,16 @@ export function LaporanSlotSayaPage({
     const uploadedCount = (report?.photos[1] ? 1 : 0) + (report?.photos[2] ? 1 : 0);
     const secD = p1Ready && p2Ready;
 
-    return { secA, answeredCount, secB, secC, uploadedCount, secD };
+    return {
+      secA,
+      answeredCount,
+      secB,
+      q6RequiresRepair,
+      requiresObservationNotes,
+      secC,
+      uploadedCount,
+      secD,
+    };
   }, [
     attendance,
     q1,
@@ -259,11 +364,7 @@ export function LaporanSlotSayaPage({
     q5,
     q6,
     hasIncident,
-    incidents,
-    handoverStatus,
-    handoverNote,
-    handoverReceiver,
-    handoverTime,
+    observationNotes,
     report?.photos,
     photo1State,
     photo2State,
@@ -280,11 +381,7 @@ export function LaporanSlotSayaPage({
     q5,
     q6,
     hasIncident,
-    incidents: hasIncident === 'Ya' ? incidents : [],
-    handoverStatus,
-    handoverReceiver,
-    handoverTime,
-    handoverNote,
+    observationNotes,
     photoMeta: {
       1: {
         takenTime: photo1State.takenTime,
@@ -481,75 +578,65 @@ export function LaporanSlotSayaPage({
     void handlePhotoUpload(photoIndex, file);
   };
 
-  const validateBeforeReviewOrSubmit = (): string | null => {
+  const collectMissingItems = (): string[] => {
+    const missing: string[] = [];
     if (!attendance.some((a) => a.present)) {
-      return 'Sila tandakan sekurang-kurangnya seorang guru yang benar-benar hadir dalam Bahagian A.';
+      missing.push('Bahagian A: Tandakan sekurang-kurangnya seorang petugas yang hadir.');
     }
     const answerMap = { q1, q2, q3, q4, q5, q6 };
     for (const q of MONITORING_QUESTIONS) {
       if (!answerMap[q.key]) {
-        return `Sila jawab Soalan ${q.number} dalam Bahagian B.`;
+        missing.push(`Bahagian B: Jawab Soalan ${q.number}.`);
       }
     }
     if (!hasIncident) {
-      return 'Sila pilih Ya atau Tidak bagi soalan kejadian dalam Bahagian C.';
+      missing.push(
+        'Bahagian C: Pilih Ya atau Tidak bagi soalan sama ada terdapat kejadian, kerosakan atau keadaan yang perlu dicatat.'
+      );
     }
-    if (hasIncident === 'Ya') {
-      if (incidents.length === 0) {
-        return 'Sila isi sekurang-kurangnya satu catatan kejadian dalam Bahagian C.';
-      }
-      for (let i = 0; i < incidents.length; i++) {
-        const inc = incidents[i];
-        if (
-          !inc.time.trim() ||
-          !inc.location.trim() ||
-          !inc.description.trim() ||
-          !inc.actionTaken.trim() ||
-          !inc.notifiedParty.trim() ||
-          !inc.followUpAction.trim()
-        ) {
-          return `Sila lengkapkan semua medan pada Catatan Kejadian ${i + 1}.`;
-        }
-      }
+    const needTentRepairNotes = q6RequiresTentRepair(q6);
+    if ((hasIncident === 'Ya' || needTentRepairNotes) && !observationNotes.trim()) {
+      missing.push(
+        needTentRepairNotes
+          ? 'Bahagian C: Lengkapkan ruangan wajib Catatan pemerhatian (nyatakan lokasi khemah, kerosakan yang dilihat dan tindakan yang diambil atau masih diperlukan).'
+          : 'Bahagian C: Lengkapkan ruangan wajib Catatan pemerhatian.'
+      );
     }
-    if (!handoverStatus) {
-      return 'Sila pilih status serahan tugas dalam Bahagian C.';
-    }
-    if (handoverStatus === 'Belum selesai.') {
-      if (!handoverNote.trim()) {
-        return 'Sila isi catatan ringkas bagi status serahan "Belum selesai.".';
-      }
-    } else if (!handoverReceiver.trim() || !handoverTime.trim()) {
-      return 'Sila isi nama penerima dan masa serahan dalam Bahagian C.';
-    }
-    if (!report?.photos[1] || !report?.photos[2]) {
-      return 'Kedua-dua gambar wajib (Gambar 1 dan Gambar 2) mesti dimuat naik sebelum semakan akhir atau penghantaran.';
-    }
-    if (
+    if (!report?.photos[1]) {
+      missing.push('Bahagian D: Muat naik Gambar 1 wajib.');
+    } else if (
       !photo1State.takenTime.trim() ||
       !photo1State.location.trim() ||
       !photo1State.caption.trim()
     ) {
-      return 'Sila lengkapkan masa diambil, lokasi dan pemerhatian ringkas bagi Gambar 1.';
+      missing.push('Bahagian D: Lengkapkan masa, lokasi dan pemerhatian Gambar 1.');
     }
-    if (
+    if (!report?.photos[2]) {
+      missing.push('Bahagian D: Muat naik Gambar 2 wajib.');
+    } else if (
       !photo2State.takenTime.trim() ||
       !photo2State.location.trim() ||
       !photo2State.caption.trim()
     ) {
-      return 'Sila lengkapkan masa diambil, lokasi dan pemerhatian ringkas bagi Gambar 2.';
+      missing.push('Bahagian D: Lengkapkan masa, lokasi dan pemerhatian Gambar 2.');
     }
-    return null;
+    return missing;
   };
 
   const handleOpenReview = async () => {
     setFormError(null);
     setStatusMessage(null);
-    const validationErr = validateBeforeReviewOrSubmit();
-    if (validationErr) {
-      setFormError(validationErr);
+    setSubmitFailed(false);
+    const missing = collectMissingItems();
+    if (missing.length > 0) {
+      setShowValidationErrors(true);
+      setMissingItems(missing);
+      setFormError('Sila lengkapkan maklumat wajib berikut sebelum semakan akhir:');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
       return;
     }
+    setShowValidationErrors(false);
+    setMissingItems([]);
     try {
       setSavingDraft(true);
       const data = await apiFetch<{ message: string; report: ReportDTO }>(
@@ -573,10 +660,23 @@ export function LaporanSlotSayaPage({
     if (submittingReport) return;
     setFormError(null);
     setStatusMessage(null);
-    const validationErr = validateBeforeReviewOrSubmit();
-    if (validationErr) {
-      setFormError(validationErr);
+    setSubmitFailed(false);
+    const missing = collectMissingItems();
+    if (missing.length > 0) {
+      setShowValidationErrors(true);
+      setMissingItems(missing);
+      setFormError('Laporan belum lengkap. Sila lengkapkan perkara berikut sebelum menghantar:');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
       return;
+    }
+    setShowValidationErrors(false);
+    setMissingItems([]);
+
+    if (!submissionKeyRef.current) {
+      submissionKeyRef.current =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `sub_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
     }
 
     setSubmittingReport(true);
@@ -585,16 +685,27 @@ export function LaporanSlotSayaPage({
         '/api/my-report/submit',
         {
           method: 'POST',
-          body: JSON.stringify(buildPayload()),
+          body: JSON.stringify({
+            ...buildPayload(),
+            submissionKey: submissionKeyRef.current,
+          }),
         }
       );
+      submissionKeyRef.current = null;
       hydrateFormFromReport(data.report);
       setIsReviewMode(false);
+      setSubmitFailed(false);
       setStatusMessage(data.message);
-      await onRefreshSchedule();
+      void onRefreshSchedule();
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
-      setFormError((err as Error).message);
+      setSubmitFailed(true);
+      setFormError(
+        err instanceof Error && err.message
+          ? err.message
+          : 'Sambungan terganggu semasa menghantar laporan. Maklumat anda dikekalkan; sila cuba lagi.'
+      );
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     } finally {
       setSubmittingReport(false);
     }
@@ -668,9 +779,8 @@ export function LaporanSlotSayaPage({
           q5: string;
           q6: string;
           hasIncident: 'Ya' | 'Tidak' | '';
-          incidents: IncidentEntry[];
+          observationNotes: string;
           extraOfficers: string;
-          handoverNote: string;
           observationSummary: string;
         };
       }>('/api/my-report/extract-from-image', {
@@ -707,16 +817,13 @@ export function LaporanSlotSayaPage({
       if (ext.hasIncident === 'Ya' || ext.hasIncident === 'Tidak') {
         setHasIncident(ext.hasIncident);
         filledCount++;
-        if (ext.hasIncident === 'Ya' && ext.incidents.length > 0) {
-          setIncidents(ext.incidents);
-        }
+      }
+      if (ext.observationNotes) {
+        setObservationNotes(ext.observationNotes);
+        filledCount++;
       }
       if (ext.extraOfficers) {
         setExtraOfficers(ext.extraOfficers);
-        filledCount++;
-      }
-      if (ext.handoverNote) {
-        setHandoverNote(ext.handoverNote);
         filledCount++;
       }
 
@@ -824,51 +931,94 @@ export function LaporanSlotSayaPage({
     );
   }
 
-  const receiverLabel =
-    report.slotNumber === 6
-      ? 'Penyelaras penerima laporan akhir'
-      : 'Penerima daripada slot berikutnya';
-
   // Submitted Report View
   if (report.status === 'submitted') {
+    const isAcknowledged = Boolean(report.acknowledgedAt);
+
     return (
       <div className="mx-auto max-w-4xl space-y-6">
-        <div className="rounded-2xl border border-emerald-300 bg-emerald-50 p-6">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        {/* Status Laporan Saya */}
+        <section
+          aria-label="Status Laporan Saya"
+          className={`rounded-2xl border p-5 sm:p-6 ${
+            isAcknowledged
+              ? 'border-emerald-300 bg-emerald-50'
+              : 'border-teal-200 bg-teal-50/70'
+          }`}
+        >
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div className="flex items-start gap-3">
-              <CheckCircle2 className="mt-0.5 h-6 w-6 shrink-0 text-emerald-700" />
-              <div>
-                <h1 className="text-xl font-bold text-emerald-950">
-                  Laporan Slot {report.slotNumber} berjaya dihantar
-                </h1>
-                <p className="mt-1 text-sm text-emerald-900">
-                  Dihantar oleh <strong>{report.submittedByName}</strong> pada{' '}
-                  <span className="font-mono tabular-nums">
-                    {report.submittedAtDisplay}
-                  </span>
-                  .
+              {isAcknowledged ? (
+                <CheckCircle2 className="mt-0.5 h-6 w-6 shrink-0 text-emerald-700" />
+              ) : (
+                <Clock className="mt-0.5 h-6 w-6 shrink-0 text-teal-700" />
+              )}
+              <div className="space-y-1.5">
+                <p className="text-xs font-bold uppercase tracking-wide text-slate-600">
+                  Status Laporan Saya — Slot {report.slotNumber}
                 </p>
-                {report.reopenedAt && report.updatedAtDisplay && (
-                  <p className="mt-1 font-mono text-xs text-emerald-800 tabular-nums">
-                    Kemas kini terakhir: {report.updatedAtDisplay}
+                <h1 className="text-xl font-bold text-slate-900">
+                  {isAcknowledged
+                    ? 'Diterima oleh penyelaras'
+                    : 'Berjaya dihantar'}
+                </h1>
+                <p className="text-sm text-slate-800">
+                  {isAcknowledged
+                    ? ackNotification ||
+                      `Laporan Slot ${report.slotNumber} telah diterima oleh penyelaras pada ${report.acknowledgementDateStr}, ${report.acknowledgementTimeStr}.`
+                    : 'Laporan anda telah dihantar dan sedang menunggu pengesahan penyelaras.'}
+                </p>
+                <div className="pt-1 text-xs text-slate-700 font-mono tabular-nums space-y-0.5">
+                  <p>
+                    Nombor Slot: Slot {report.slotNumber} ({report.displayTime})
                   </p>
-                )}
+                  <p>
+                    Tarikh &amp; Masa Hantar: {report.submittedAtDisplay} · Oleh{' '}
+                    {report.submittedByName}
+                  </p>
+                  {isAcknowledged && report.acknowledgedAtDisplay && (
+                    <p>
+                      Disahkan Oleh: {report.acknowledgedByName || 'Penyelaras'} pada{' '}
+                      {report.acknowledgedAtDisplay}
+                    </p>
+                  )}
+                  {report.reopenedAt && report.updatedAtDisplay && (
+                    <p>Kemas kini terakhir: {report.updatedAtDisplay}</p>
+                  )}
+                </div>
               </div>
             </div>
 
-            <button
-              type="button"
-              onClick={() => handleDownloadPdf(false)}
-              disabled={downloadingPdf}
-              className="inline-flex min-h-[44px] shrink-0 items-center justify-center gap-2 rounded-lg bg-teal-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-teal-800 disabled:opacity-60"
-            >
-              <Download className="h-4 w-4" />
-              <span>
-                {downloadingPdf ? 'Menjana PDF...' : 'Muat Turun Laporan PDF'}
-              </span>
-            </button>
+            <div className="flex flex-col gap-2 sm:items-end shrink-0">
+              <button
+                type="button"
+                onClick={() => handleDownloadPdf(false)}
+                disabled={downloadingPdf}
+                className="inline-flex min-h-[44px] w-full sm:w-auto items-center justify-center gap-2 rounded-lg bg-teal-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-teal-800 disabled:opacity-60"
+              >
+                <Download className="h-4 w-4" />
+                <span>
+                  {downloadingPdf ? 'Menjana PDF...' : 'Muat Turun Laporan PDF'}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void silentRefreshReportStatus()}
+                className="inline-flex min-h-[40px] w-full sm:w-auto items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                <span>Semak Status Terkini</span>
+              </button>
+            </div>
           </div>
-        </div>
+        </section>
+
+        {ackNotification && !isAcknowledged && (
+          <div className="flex items-start gap-3 rounded-xl border border-emerald-300 bg-emerald-50 p-4 text-sm font-medium text-emerald-950">
+            <Bell className="mt-0.5 h-5 w-5 shrink-0 text-emerald-700" />
+            <span>{ackNotification}</span>
+          </div>
+        )}
 
         {formError && (
           <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
@@ -885,6 +1035,7 @@ export function LaporanSlotSayaPage({
   if (isReviewMode) {
     const draftPreview: ReportDTO = {
       ...report,
+      formVersion: 2,
       attendance,
       extraOfficers,
       q1,
@@ -894,11 +1045,8 @@ export function LaporanSlotSayaPage({
       q5,
       q6,
       hasIncident,
-      incidents: hasIncident === 'Ya' ? incidents : [],
-      handoverStatus,
-      handoverReceiver,
-      handoverTime,
-      handoverNote,
+      observationNotes,
+      incidents: [],
       photos: {
         1: report.photos[1]
           ? {
@@ -926,16 +1074,36 @@ export function LaporanSlotSayaPage({
             Semakan Akhir Laporan — Slot {report.slotNumber}
           </h1>
           <p className="mt-1 text-sm text-slate-600">
-            Sila semak semua maklumat, jawapan pemantauan, catatan serahan dan kedua-dua gambar sebelum menghantar laporan rasmi.
+            Sila semak semua maklumat, jawapan pemantauan, catatan hasil pemantauan dan kedua-dua gambar sebelum menghantar laporan rasmi.
           </p>
         </div>
 
         {formError && (
           <div
             role="alert"
-            className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm font-medium text-red-800"
+            className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800 space-y-2"
           >
-            {formError}
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <span className="font-medium">{formError}</span>
+              {submitFailed && (
+                <button
+                  type="button"
+                  onClick={handleSubmitReport}
+                  disabled={submittingReport}
+                  className="inline-flex min-h-[42px] shrink-0 items-center justify-center gap-1.5 rounded-lg bg-red-700 px-4 py-2 text-xs font-semibold text-white hover:bg-red-800 disabled:opacity-60"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  <span>{submittingReport ? 'Sedang menghantar…' : 'Cuba Lagi'}</span>
+                </button>
+              )}
+            </div>
+            {missingItems.length > 0 && (
+              <ul className="list-disc pl-5 text-xs space-y-1">
+                {missingItems.map((item, idx) => (
+                  <li key={idx}>{item}</li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
 
@@ -974,7 +1142,7 @@ export function LaporanSlotSayaPage({
             >
               <Send className="h-4 w-4" />
               <span>
-                {submittingReport ? 'Menghantar Laporan...' : 'Hantar Laporan'}
+                {submittingReport ? 'Sedang menghantar…' : 'Hantar Laporan'}
               </span>
             </button>
           </div>
@@ -1034,7 +1202,7 @@ export function LaporanSlotSayaPage({
             </span>
             <input
               type="file"
-              accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif"
+              accept="image/*"
               onChange={handleFileInput(photoIndex)}
               className="sr-only"
             />
@@ -1121,7 +1289,7 @@ export function LaporanSlotSayaPage({
                 setState((prev) => ({ ...prev, takenTime: e.target.value }))
               }
               placeholder="Cth: 11.25 malam"
-              className="mt-1 w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-teal-700 focus:outline-none"
+              className="mt-1 w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-3 py-2 text-base sm:text-sm text-slate-900 focus:border-teal-700 focus:outline-none"
             />
           </div>
 
@@ -1136,7 +1304,7 @@ export function LaporanSlotSayaPage({
                 setState((prev) => ({ ...prev, location: e.target.value }))
               }
               placeholder="Cth: Laluan khemah ke tandas"
-              className="mt-1 w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-teal-700 focus:outline-none"
+              className="mt-1 w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-3 py-2 text-base sm:text-sm text-slate-900 focus:border-teal-700 focus:outline-none"
             />
             <div className="mt-1.5 flex flex-wrap gap-1.5">
               {QUICK_LOCATIONS.map((loc) => (
@@ -1187,7 +1355,7 @@ export function LaporanSlotSayaPage({
                 setState((prev) => ({ ...prev, caption: e.target.value }))
               }
               placeholder="Pemerhatian ringkas akan dijana secara automatik selepas gambar dimuat naik, atau taip terus di sini."
-              className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-teal-700 focus:outline-none"
+              className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-base sm:text-sm text-slate-900 focus:border-teal-700 focus:outline-none"
             />
 
             {state.observationNotice && (
@@ -1214,9 +1382,17 @@ export function LaporanSlotSayaPage({
               Laporan Pemantauan Sentri Malam — Slot {report.slotNumber}
             </h1>
           </div>
-          <span className="text-xs font-semibold text-slate-600 font-mono tabular-nums">
-            Status: {report.status === 'draft' ? 'Draf Disimpan' : 'Belum Diisi'}
-          </span>
+          <div className="flex flex-col items-start sm:items-end gap-1.5">
+            <span className="text-xs font-semibold text-slate-700 font-mono tabular-nums">
+              Status Laporan Saya:{' '}
+              {report.status === 'draft'
+                ? 'Draf Disimpan (Belum Dihantar)'
+                : 'Belum Diisi'}
+            </span>
+            <span className="text-[11px] text-slate-500 font-mono tabular-nums">
+              Slot {report.slotNumber} · {report.displayTime}
+            </span>
+          </div>
         </div>
 
         <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm leading-relaxed text-slate-800">
@@ -1266,7 +1442,7 @@ export function LaporanSlotSayaPage({
               }`}
             >
               {completionStats.secC && <Check className="h-3.5 w-3.5" />}
-              <span>Kejadian &amp; Serahan</span>
+              <span>Hasil Pemantauan</span>
             </span>
           </a>
 
@@ -1347,9 +1523,29 @@ export function LaporanSlotSayaPage({
       {formError && (
         <div
           role="alert"
-          className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-800"
+          className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 space-y-2"
         >
-          {formError}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <span className="font-medium">{formError}</span>
+            {submitFailed && (
+              <button
+                type="button"
+                onClick={handleSubmitReport}
+                disabled={submittingReport}
+                className="inline-flex min-h-[42px] shrink-0 items-center justify-center gap-1.5 rounded-lg bg-red-700 px-4 py-2 text-xs font-semibold text-white hover:bg-red-800 disabled:opacity-60"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                <span>{submittingReport ? 'Sedang menghantar…' : 'Cuba Lagi'}</span>
+              </button>
+            )}
+          </div>
+          {missingItems.length > 0 && (
+            <ul className="list-disc pl-5 text-xs space-y-1">
+              {missingItems.map((item, idx) => (
+                <li key={idx}>{item}</li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 
@@ -1468,7 +1664,7 @@ export function LaporanSlotSayaPage({
             value={extraOfficers}
             onChange={(e) => setExtraOfficers(e.target.value)}
             placeholder="Tinggalkan kosong jika tiada petugas tambahan atau pengganti"
-            className="mt-1.5 w-full min-h-[44px] rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-teal-700 focus:outline-none"
+            className="mt-1.5 w-full min-h-[44px] rounded-lg border border-slate-300 px-3 py-2 text-base sm:text-sm text-slate-900 focus:border-teal-700 focus:outline-none"
           />
         </div>
       </section>
@@ -1483,16 +1679,24 @@ export function LaporanSlotSayaPage({
             <h2 className="text-base font-bold text-slate-900">
               BAHAGIAN B — DAPATAN PEMANTAUAN
             </h2>
-            <p className="mt-0.5 text-xs text-slate-500">
-              Semua enam soalan wajib dijawab dengan memilih satu jawapan sahaja.
+            <p className="mt-0.5 text-xs text-slate-600">
+              Jawab semua enam soalan berdasarkan pemerhatian sepanjang slot bertugas. Pilih satu jawapan bagi setiap soalan.
             </p>
           </div>
-          <span className="font-mono text-xs font-semibold text-slate-600 tabular-nums">
+          <span
+            className={`font-mono text-xs font-semibold tabular-nums ${
+              completionStats.secB
+                ? 'text-emerald-700'
+                : showValidationErrors
+                ? 'text-red-700'
+                : 'text-slate-600'
+            }`}
+          >
             {completionStats.answeredCount}/6 dijawab
           </span>
         </div>
 
-        <div className="space-y-6 divide-y divide-slate-100">
+        <div className="space-y-5">
           {MONITORING_QUESTIONS.map((q) => {
             const valMap = { q1, q2, q3, q4, q5, q6 };
             const setterMap = {
@@ -1505,29 +1709,47 @@ export function LaporanSlotSayaPage({
             };
             const selectedValue = valMap[q.key];
             const setValue = setterMap[q.key];
+            const isMissing = showValidationErrors && !selectedValue;
 
             return (
-              <fieldset key={q.key} className="pt-5 first:pt-0 space-y-2.5">
+              <fieldset
+                key={q.key}
+                className={`rounded-xl border p-4 space-y-3 transition-colors ${
+                  isMissing
+                    ? 'border-red-300 bg-red-50/60'
+                    : 'border-slate-200/80 bg-white'
+                }`}
+              >
                 <div className="flex items-start justify-between gap-3">
                   <legend className="text-sm font-semibold text-slate-900 leading-snug">
                     {q.prompt}
                   </legend>
                   <span
                     className={`shrink-0 text-xs font-semibold ${
-                      selectedValue ? 'text-emerald-700' : 'text-slate-400'
+                      selectedValue
+                        ? 'text-emerald-700'
+                        : isMissing
+                        ? 'text-red-700'
+                        : 'text-slate-400'
                     }`}
                   >
-                    {selectedValue ? 'Dijawab' : 'Wajib'}
+                    {selectedValue
+                      ? 'Dijawab'
+                      : isMissing
+                      ? 'Wajib dijawab'
+                      : 'Wajib'}
                   </span>
                 </div>
 
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-2">
                   {q.options.map((opt) => (
                     <label
                       key={opt}
-                      className={`flex min-h-[44px] cursor-pointer items-center gap-3 rounded-lg border px-3.5 py-2 text-sm transition-colors ${
+                      className={`flex min-h-[44px] cursor-pointer items-center gap-3 rounded-lg border px-3.5 py-2.5 text-sm transition-colors ${
                         selectedValue === opt
                           ? 'border-teal-700 bg-teal-50/70 font-medium text-teal-950'
+                          : isMissing
+                          ? 'border-red-200 bg-white text-slate-800 hover:border-red-300'
                           : 'border-slate-200 bg-white text-slate-800 hover:border-slate-300'
                       }`}
                     >
@@ -1551,37 +1773,71 @@ export function LaporanSlotSayaPage({
       {/* BAHAGIAN C */}
       <section
         id="bahagian-c"
-        className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 space-y-6 scroll-mt-20"
+        className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 space-y-5 scroll-mt-20"
       >
-        <h2 className="text-base font-bold text-slate-900 border-b border-slate-100 pb-3">
-          BAHAGIAN C — CATATAN KEJADIAN DAN SERAHAN TUGAS
-        </h2>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+          <h2 className="text-base font-bold text-slate-900">
+            BAHAGIAN C — CATATAN HASIL PEMANTAUAN
+          </h2>
+          <span
+            className={`text-xs font-semibold ${
+              completionStats.secC
+                ? 'text-emerald-700'
+                : showValidationErrors
+                ? 'text-red-700'
+                : 'text-slate-500'
+            }`}
+          >
+            {completionStats.secC ? 'Lengkap' : 'Wajib dijawab'}
+          </span>
+        </div>
 
-        <fieldset className="space-y-2.5">
-          <legend className="text-sm font-semibold text-slate-900">
-            Adakah terdapat kejadian atau perkara yang memerlukan tindakan susulan?
-          </legend>
-          <div className="flex flex-wrap gap-3">
+        <fieldset
+          className={`rounded-xl border p-4 space-y-3 transition-colors ${
+            showValidationErrors && !hasIncident
+              ? 'border-red-300 bg-red-50/60'
+              : 'border-slate-200/80 bg-white'
+          }`}
+        >
+          <div className="flex items-start justify-between gap-3">
+            <legend className="text-sm font-semibold text-slate-900 leading-snug">
+              Adakah terdapat kejadian, kerosakan atau keadaan yang perlu dicatat sepanjang slot bertugas?
+            </legend>
+            <span
+              className={`shrink-0 text-xs font-semibold ${
+                hasIncident
+                  ? 'text-emerald-700'
+                  : showValidationErrors
+                  ? 'text-red-700'
+                  : 'text-slate-400'
+              }`}
+            >
+              {hasIncident
+                ? 'Dijawab'
+                : showValidationErrors
+                ? 'Wajib dijawab'
+                : 'Wajib'}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 gap-2 sm:max-w-xs">
             {(['Ya', 'Tidak'] as const).map((choice) => (
               <label
                 key={choice}
-                className={`flex min-h-[44px] min-w-[120px] cursor-pointer items-center gap-3 rounded-lg border px-4 py-2 text-sm ${
+                className={`flex min-h-[44px] cursor-pointer items-center gap-3 rounded-lg border px-4 py-2.5 text-sm transition-colors ${
                   hasIncident === choice
                     ? 'border-teal-700 bg-teal-50/70 font-semibold text-teal-950'
-                    : 'border-slate-200 bg-white text-slate-800'
+                    : showValidationErrors && !hasIncident
+                    ? 'border-red-200 bg-white text-slate-800 hover:border-red-300'
+                    : 'border-slate-200 bg-white text-slate-800 hover:border-slate-300'
                 }`}
               >
                 <input
                   type="radio"
                   name="has-incident"
                   checked={hasIncident === choice}
-                  onChange={() => {
-                    setHasIncident(choice);
-                    if (choice === 'Ya' && incidents.length === 0) {
-                      setIncidents([emptyIncident()]);
-                    }
-                  }}
-                  className="h-4 w-4 text-teal-700"
+                  onChange={() => setHasIncident(choice)}
+                  className="h-4 w-4 shrink-0 text-teal-700 focus:ring-teal-700"
                 />
                 <span>{choice}</span>
               </label>
@@ -1589,266 +1845,78 @@ export function LaporanSlotSayaPage({
           </div>
         </fieldset>
 
-        {hasIncident === 'Ya' && (
-          <div className="space-y-4">
-            {incidents.map((inc, index) => (
-              <div
-                key={index}
-                className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 space-y-3"
-              >
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-bold text-slate-900">
-                    Catatan Kejadian {index + 1}
-                  </h3>
-                  {incidents.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setIncidents((prev) => prev.filter((_, i) => i !== index))
-                      }
-                      className="inline-flex min-h-[36px] items-center gap-1 text-xs font-semibold text-red-700 hover:text-red-900"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                      <span>Padam</span>
-                    </button>
-                  )}
-                </div>
-
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700">
-                      Masa *
-                    </label>
-                    <input
-                      type="text"
-                      value={inc.time}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setIncidents((prev) =>
-                          prev.map((item, i) =>
-                            i === index ? { ...item, time: val } : item
-                          )
-                        );
-                      }}
-                      placeholder="Cth: 12.15 pagi"
-                      className="mt-1 w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700">
-                      Lokasi *
-                    </label>
-                    <input
-                      type="text"
-                      value={inc.location}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setIncidents((prev) =>
-                          prev.map((item, i) =>
-                            i === index ? { ...item, location: val } : item
-                          )
-                        );
-                      }}
-                      placeholder="Cth: Blok Khemah Lelaki B"
-                      className="mt-1 w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700">
-                    Perkara yang berlaku *
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={inc.description}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setIncidents((prev) =>
-                        prev.map((item, i) =>
-                          i === index ? { ...item, description: val } : item
-                        )
-                      );
-                    }}
-                    className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700">
-                    Tindakan yang telah diambil *
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={inc.actionTaken}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setIncidents((prev) =>
-                        prev.map((item, i) =>
-                          i === index ? { ...item, actionTaken: val } : item
-                        )
-                      );
-                    }}
-                    className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
-                  />
-                </div>
-
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700">
-                      Pihak yang dimaklumkan *
-                    </label>
-                    <input
-                      type="text"
-                      value={inc.notifiedParty}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setIncidents((prev) =>
-                          prev.map((item, i) =>
-                            i === index ? { ...item, notifiedParty: val } : item
-                          )
-                        );
-                      }}
-                      placeholder="Cth: Kem Komandan / Penyelaras"
-                      className="mt-1 w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700">
-                      Tindakan lanjut yang diperlukan *
-                    </label>
-                    <input
-                      type="text"
-                      value={inc.followUpAction}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setIncidents((prev) =>
-                          prev.map((item, i) =>
-                            i === index ? { ...item, followUpAction: val } : item
-                          )
-                        );
-                      }}
-                      placeholder="Cth: Pembaikan lampu laluan pagi esok"
-                      className="mt-1 w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
-                    />
-                  </div>
-                </div>
-              </div>
-            ))}
-
-            <button
-              type="button"
-              onClick={() => setIncidents((prev) => [...prev, emptyIncident()])}
-              className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50"
-            >
-              <Plus className="h-4 w-4" />
-              <span>Tambah Catatan</span>
-            </button>
-          </div>
-        )}
-
-        <fieldset className="space-y-2.5 pt-2 border-t border-slate-100">
-          <legend className="text-sm font-semibold text-slate-900">
-            Status Serahan Tugas
-          </legend>
-          <div className="space-y-2">
-            {HANDOVER_STATUS_OPTIONS.map((opt) => (
+        {completionStats.requiresObservationNotes ? (
+          <div
+            className={`rounded-xl border p-4 space-y-2.5 ${
+              showValidationErrors && !observationNotes.trim()
+                ? 'border-red-300 bg-red-50/60'
+                : completionStats.q6RequiresRepair
+                ? 'border-amber-300 bg-amber-50/60'
+                : 'border-slate-200 bg-slate-50/70'
+            }`}
+          >
+            <div className="flex items-start justify-between gap-2">
               <label
-                key={opt}
-                className={`flex min-h-[44px] cursor-pointer items-center gap-3 rounded-lg border px-4 py-2.5 text-sm ${
-                  handoverStatus === opt
-                    ? 'border-teal-700 bg-teal-50/70 font-medium text-teal-950'
-                    : 'border-slate-200 bg-white text-slate-800'
+                htmlFor="observation-notes"
+                className="block text-sm font-semibold text-slate-900"
+              >
+                Catatan pemerhatian *
+              </label>
+              <span
+                className={`shrink-0 text-xs font-semibold ${
+                  observationNotes.trim()
+                    ? 'text-emerald-700'
+                    : showValidationErrors
+                    ? 'text-red-700'
+                    : 'text-amber-800'
                 }`}
               >
-                <input
-                  type="radio"
-                  name="handover-status"
-                  checked={handoverStatus === opt}
-                  onChange={() => setHandoverStatus(opt)}
-                  className="h-4 w-4 text-teal-700"
-                />
-                <span>{opt}</span>
-              </label>
-            ))}
-          </div>
-        </fieldset>
+                {observationNotes.trim() ? 'Diisi' : 'Wajib diisi'}
+              </span>
+            </div>
 
-        {handoverStatus === 'Belum selesai.' ? (
-          <div>
-            <label
-              htmlFor="handover-note"
-              className="block text-sm font-semibold text-slate-800"
-            >
-              Catatan ringkas *
-            </label>
+            {completionStats.q6RequiresRepair && (
+              <p className="rounded-lg border border-amber-200 bg-white px-3 py-2 text-xs font-medium text-amber-950">
+                Soalan 6 menunjukkan khemah memerlukan pembaikan. Sila rekodkan{' '}
+                <strong>
+                  lokasi khemah, kerosakan yang dilihat dan tindakan yang diambil atau masih diperlukan
+                </strong>
+                .
+              </p>
+            )}
+
+            {hasIncident === 'Ya' && (
+              <p className="text-xs text-slate-700">
+                Nyatakan perkara yang diperhatikan, masa, lokasi dan tindakan yang diambil, jika berkenaan.
+              </p>
+            )}
+
             <textarea
-              id="handover-note"
-              rows={2}
-              value={handoverNote}
-              onChange={(e) => setHandoverNote(e.target.value)}
-              placeholder="Nyatakan sebab serahan tugas belum selesai"
-              className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              id="observation-notes"
+              rows={4}
+              value={observationNotes}
+              onChange={(e) => setObservationNotes(e.target.value)}
+              placeholder={
+                completionStats.q6RequiresRepair
+                  ? 'Nyatakan lokasi khemah, kerosakan yang dilihat dan tindakan yang diambil atau masih diperlukan...'
+                  : 'Nyatakan perkara yang diperhatikan, masa, lokasi dan tindakan yang diambil, jika berkenaan.'
+              }
+              className={`w-full rounded-lg border bg-white px-3.5 py-2.5 text-base sm:text-sm text-slate-900 focus:outline-none ${
+                showValidationErrors && !observationNotes.trim()
+                  ? 'border-red-400 focus:border-red-600'
+                  : 'border-slate-300 focus:border-teal-700'
+              }`}
             />
+
+            {showValidationErrors && !observationNotes.trim() && (
+              <p className="text-xs font-medium text-red-700">
+                Ruangan Catatan pemerhatian wajib diisi sebelum laporan dihantar.
+              </p>
+            )}
           </div>
-        ) : handoverStatus ? (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div>
-              <label
-                htmlFor="handover-receiver"
-                className="block text-sm font-semibold text-slate-800"
-              >
-                {receiverLabel} *
-              </label>
-              <input
-                id="handover-receiver"
-                type="text"
-                value={handoverReceiver}
-                onChange={(e) => setHandoverReceiver(e.target.value)}
-                placeholder="Nama penuh penerima"
-                className="mt-1.5 w-full min-h-[44px] rounded-lg border border-slate-300 px-3 py-2 text-sm"
-              />
-              {report.nextSlotMembers.length > 0 && (
-                <div className="mt-1.5 flex flex-wrap gap-1.5">
-                  {report.nextSlotMembers.map((name) => (
-                    <button
-                      key={name}
-                      type="button"
-                      onClick={() => setHandoverReceiver(name)}
-                      className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:border-teal-600 hover:text-teal-800"
-                    >
-                      {name}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            <div>
-              <div className="flex items-center justify-between gap-2">
-                <label
-                  htmlFor="handover-time"
-                  className="block text-sm font-semibold text-slate-800"
-                >
-                  Masa Serahan *
-                </label>
-                <button
-                  type="button"
-                  onClick={() => setHandoverTime(getCurrentTimeLabelMY())}
-                  className="inline-flex items-center gap-1 text-xs font-semibold text-teal-700 hover:text-teal-900"
-                >
-                  <Clock className="h-3 w-3" />
-                  <span>Isi Masa Sekarang</span>
-                </button>
-              </div>
-              <input
-                id="handover-time"
-                type="text"
-                value={handoverTime}
-                onChange={(e) => setHandoverTime(e.target.value)}
-                placeholder="Cth: 11.50 malam"
-                className="mt-1.5 w-full min-h-[44px] rounded-lg border border-slate-300 px-3 py-2 text-sm"
-              />
-            </div>
+        ) : hasIncident === 'Tidak' ? (
+          <div className="rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3 text-xs text-slate-700">
+            Tiada kejadian atau kerosakan khemah dilaporkan. Anda boleh meneruskan laporan ke Bahagian D tanpa catatan tambahan.
           </div>
         ) : null}
       </section>
@@ -1904,7 +1972,7 @@ export function LaporanSlotSayaPage({
           >
             <Send className="h-4 w-4" />
             <span>
-              {submittingReport ? 'Menghantar...' : 'Hantar Laporan'}
+              {submittingReport ? 'Sedang menghantar…' : 'Hantar Laporan'}
             </span>
           </button>
         </div>
@@ -1914,10 +1982,12 @@ export function LaporanSlotSayaPage({
 }
 
 export function ReportReadOnlySummary({ report }: { report: ReportDTO }) {
-  const receiverLabel =
-    report.slotNumber === 6
-      ? 'Penyelaras penerima laporan akhir'
-      : 'Penerima daripada slot berikutnya';
+  const monitoringQuestions = getMonitoringQuestionsForReport(report);
+  const showNotes = Boolean(
+    report.observationNotes.trim() ||
+      report.hasIncident === 'Ya' ||
+      q6RequiresTentRepair(report.q6)
+  );
 
   return (
     <div className="space-y-6">
@@ -1998,7 +2068,7 @@ export function ReportReadOnlySummary({ report }: { report: ReportDTO }) {
           BAHAGIAN B — DAPATAN PEMANTAUAN
         </h2>
         <div className="space-y-3 text-sm">
-          {MONITORING_QUESTIONS.map((q) => (
+          {monitoringQuestions.map((q) => (
             <div key={q.key} className="border-b border-slate-100 pb-2.5 last:border-b-0">
               <p className="font-semibold text-slate-900">{q.prompt}</p>
               <p className="mt-1 text-teal-800 font-medium">
@@ -2011,16 +2081,29 @@ export function ReportReadOnlySummary({ report }: { report: ReportDTO }) {
 
       <section className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 space-y-4">
         <h2 className="text-base font-bold text-slate-900 border-b border-slate-100 pb-3">
-          BAHAGIAN C — CATATAN KEJADIAN DAN SERAHAN TUGAS
+          BAHAGIAN C — CATATAN HASIL PEMANTAUAN
         </h2>
         <div className="text-sm space-y-3">
           <p>
             <span className="font-semibold text-slate-800">
-              Kejadian memerlukan tindakan susulan:{' '}
+              Adakah terdapat kejadian, kerosakan atau keadaan yang perlu dicatat sepanjang slot bertugas?:{' '}
             </span>
             <span className="font-bold text-slate-900">{report.hasIncident || '-'}</span>
           </p>
+
+          {showNotes && (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-1.5">
+              <p className="text-xs font-bold uppercase tracking-wide text-slate-600">
+                Catatan Pemerhatian
+              </p>
+              <p className="whitespace-pre-wrap text-slate-900">
+                {report.observationNotes.trim() || '-'}
+              </p>
+            </div>
+          )}
+
           {report.hasIncident === 'Ya' &&
+            report.incidents.length > 0 &&
             report.incidents.map((inc, idx) => (
               <div
                 key={idx}
@@ -2034,23 +2117,6 @@ export function ReportReadOnlySummary({ report }: { report: ReportDTO }) {
                 <p>Tindakan lanjut: {inc.followUpAction}</p>
               </div>
             ))}
-          <p>
-            <span className="font-semibold text-slate-800">Status Serahan: </span>
-            <span className="font-medium text-slate-900">{report.handoverStatus}</span>
-          </p>
-          {report.handoverStatus === 'Belum selesai.' ? (
-            <p>
-              <span className="font-semibold text-slate-800">Catatan Ringkas: </span>
-              {report.handoverNote}
-            </p>
-          ) : (
-            <p>
-              <span className="font-semibold text-slate-800">{receiverLabel}: </span>
-              {report.handoverReceiver} ·{' '}
-              <span className="font-semibold text-slate-800">Masa Serahan: </span>
-              {report.handoverTime}
-            </p>
-          )}
         </div>
       </section>
 

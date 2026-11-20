@@ -92,6 +92,8 @@ db.exec(`
     handover_receiver TEXT NOT NULL DEFAULT '',
     handover_time TEXT NOT NULL DEFAULT '',
     handover_note TEXT NOT NULL DEFAULT '',
+    observation_notes TEXT NOT NULL DEFAULT '',
+    form_version INTEGER NOT NULL DEFAULT 2,
     submitted_by_teacher_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     submitted_by_name TEXT,
     submitted_at TEXT,
@@ -120,6 +122,29 @@ db.exec(`
     UNIQUE(report_id, photo_index)
   );
 `);
+
+const reportCols = db.prepare('PRAGMA table_info(reports)').all() as Array<{ name: string }>;
+const reportColNames = new Set(reportCols.map((c) => c.name));
+if (!reportColNames.has('acknowledged_by_teacher_id')) {
+  db.exec(
+    'ALTER TABLE reports ADD COLUMN acknowledged_by_teacher_id INTEGER REFERENCES users(id) ON DELETE SET NULL'
+  );
+}
+if (!reportColNames.has('acknowledged_by_name')) {
+  db.exec('ALTER TABLE reports ADD COLUMN acknowledged_by_name TEXT');
+}
+if (!reportColNames.has('acknowledged_at')) {
+  db.exec('ALTER TABLE reports ADD COLUMN acknowledged_at TEXT');
+}
+if (!reportColNames.has('submission_key')) {
+  db.exec('ALTER TABLE reports ADD COLUMN submission_key TEXT');
+}
+if (!reportColNames.has('observation_notes')) {
+  db.exec("ALTER TABLE reports ADD COLUMN observation_notes TEXT NOT NULL DEFAULT ''");
+}
+if (!reportColNames.has('form_version')) {
+  db.exec('ALTER TABLE reports ADD COLUMN form_version INTEGER NOT NULL DEFAULT 1');
+}
 
 function getServerSecret(): Buffer {
   if (process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 16) {

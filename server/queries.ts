@@ -2,7 +2,6 @@ import {
   type AttendanceEntry,
   type CampNightDTO,
   type EligibleTeacherDTO,
-  type HandoverStatus,
   type IncidentEntry,
   type PublicTeacherSlotMember,
   type ReportDTO,
@@ -11,6 +10,7 @@ import {
 } from '../src/shared/constants.ts';
 import {
   formatDateDisplayMY,
+  formatDateTimePartsMY,
   formatTimestampMY,
   getSlotDates,
 } from '../src/shared/dates.ts';
@@ -106,8 +106,9 @@ export function getScheduleForCampNight(campNightId: number): {
 
   const reportRows = db
     .prepare(
-      `SELECT rep.id, rep.slot_number, rep.status, rep.has_incident, rep.handover_status,
-              rep.submitted_at, rep.submitted_by_name, rep.updated_at,
+      `SELECT rep.id, rep.slot_number, rep.status, rep.q6, rep.has_incident, rep.handover_status,
+              rep.form_version, rep.submitted_at, rep.submitted_by_name,
+              rep.acknowledged_at, rep.acknowledged_by_name, rep.updated_at,
               (SELECT COUNT(*) FROM report_photos p WHERE p.report_id = rep.id) AS photo_count
        FROM reports rep
        WHERE rep.camp_night_id = ?`
@@ -116,10 +117,14 @@ export function getScheduleForCampNight(campNightId: number): {
     id: number;
     slot_number: number;
     status: 'draft' | 'submitted';
+    q6: string | null;
     has_incident: string | null;
     handover_status: string | null;
+    form_version: number;
     submitted_at: string | null;
     submitted_by_name: string | null;
+    acknowledged_at: string | null;
+    acknowledged_by_name: string | null;
     updated_at: string;
     photo_count: number;
   }>;
@@ -154,21 +159,38 @@ export function getScheduleForCampNight(campNightId: number): {
     }
 
     const rep = reportBySlot.get(s.slot_number);
-    let reportStatus: 'Belum diisi' | 'Draf' | 'Telah dihantar' = 'Belum diisi';
+    let reportStatus:
+      | 'Belum diisi'
+      | 'Draf'
+      | 'Menunggu pengesahan'
+      | 'Diterima oleh penyelaras' = 'Belum diisi';
     let followUpStatus = 'Tiada laporan';
 
     if (rep) {
-      reportStatus = rep.status === 'submitted' ? 'Telah dihantar' : 'Draf';
+      if (rep.status === 'submitted') {
+        reportStatus = rep.acknowledged_at
+          ? 'Diterima oleh penyelaras'
+          : 'Menunggu pengesahan';
+      } else {
+        reportStatus = 'Draf';
+      }
+      const isLegacy = rep.form_version === 1;
       const needsFollowUp =
         rep.has_incident === 'Ya' ||
-        rep.handover_status === 'Selesai dengan perkara untuk tindakan susulan.' ||
-        rep.handover_status === 'Belum selesai.';
+        rep.q6 === 'Terdapat khemah yang masih memerlukan pembaikan pada akhir slot' ||
+        (isLegacy &&
+          (rep.q6 === 'Sebahagian masih memerlukan tindakan' ||
+            rep.q6 === 'Semua masih memerlukan tindakan' ||
+            rep.handover_status === 'Selesai dengan perkara untuk tindakan susulan.' ||
+            rep.handover_status === 'Belum selesai.'));
       if (rep.status === 'submitted') {
         followUpStatus = needsFollowUp ? 'Perlu tindakan susulan' : 'Tiada susulan';
       } else {
         followUpStatus = needsFollowUp ? 'Dalam draf (ada catatan susulan)' : 'Dalam draf';
       }
     }
+
+    const ackParts = formatDateTimePartsMY(rep?.acknowledged_at);
 
     return {
       slotNumber: s.slot_number,
@@ -189,12 +211,18 @@ export function getScheduleForCampNight(campNightId: number): {
       leaderName: s.leader_name,
       members,
       reportStatus,
+      isSubmitted: rep?.status === 'submitted',
       reportId: rep?.id ?? null,
       photoCount: rep?.photo_count ?? 0,
       followUpStatus,
       submittedAt: rep?.submitted_at ?? null,
       submittedAtDisplay: formatTimestampMY(rep?.submitted_at),
       submittedByName: rep?.submitted_by_name ?? null,
+      acknowledgedAt: rep?.acknowledged_at ?? null,
+      acknowledgedAtDisplay: formatTimestampMY(rep?.acknowledged_at),
+      acknowledgedByName: rep?.acknowledged_by_name ?? null,
+      acknowledgementDateStr: ackParts?.date ?? null,
+      acknowledgementTimeStr: ackParts?.time ?? null,
       updatedAt: rep?.updated_at ?? null,
     };
   });
@@ -292,13 +320,14 @@ export function getReportDTO(campNightId: number, slotNumber: number): ReportDTO
         q6: string | null;
         has_incident: 'Ya' | 'Tidak' | null;
         incidents_json: string;
-        handover_status: HandoverStatus | null;
-        handover_receiver: string;
-        handover_time: string;
-        handover_note: string;
+        observation_notes: string;
+        form_version: number;
         submitted_by_teacher_id: number | null;
         submitted_by_name: string | null;
         submitted_at: string | null;
+        acknowledged_by_teacher_id: number | null;
+        acknowledged_by_name: string | null;
+        acknowledged_at: string | null;
         updated_at: string;
         reopened_at: string | null;
       }
@@ -388,24 +417,11 @@ export function getReportDTO(campNightId: number, slotNumber: number): ReportDTO
     }
   }
 
-  let nextSlotMembers: string[] = [];
-  if (slotNumber < 6) {
-    const nextRows = db
-      .prepare(
-        `SELECT u.name
-         FROM slot_registrations r
-         JOIN users u ON u.id = r.teacher_id
-         WHERE r.camp_night_id = ? AND r.slot_number = ?
-         ORDER BY r.id ASC`
-      )
-      .all(campNightId, slotNumber + 1) as Array<{ name: string }>;
-    nextSlotMembers = nextRows.map((r) => r.name);
-  } else {
-    nextSlotMembers = ['Penyelaras Perkhemahan'];
-  }
+  const ackParts = formatDateTimePartsMY(reportRow?.acknowledged_at);
 
   return {
     id: reportRow?.id ?? null,
+    formVersion: reportRow?.form_version ?? 2,
     campNightId,
     campNightTitle: campNight.title,
     campStartDate: campNight.startDate,
@@ -419,7 +435,6 @@ export function getReportDTO(campNightId: number, slotNumber: number): ReportDTO
     leaderTeacherId: slotRow.leader_teacher_id,
     leaderName: slotRow.leader_name,
     registeredMembers,
-    nextSlotMembers,
     status: reportRow ? reportRow.status : 'unfilled',
     attendance,
     extraOfficers: reportRow?.extra_officers ?? '',
@@ -430,15 +445,18 @@ export function getReportDTO(campNightId: number, slotNumber: number): ReportDTO
     q5: reportRow?.q5 ?? null,
     q6: reportRow?.q6 ?? null,
     hasIncident: reportRow?.has_incident ?? null,
+    observationNotes: reportRow?.observation_notes ?? '',
     incidents,
-    handoverStatus: reportRow?.handover_status ?? null,
-    handoverReceiver: reportRow?.handover_receiver ?? '',
-    handoverTime: reportRow?.handover_time ?? '',
-    handoverNote: reportRow?.handover_note ?? '',
     submittedByTeacherId: reportRow?.submitted_by_teacher_id ?? null,
     submittedByName: reportRow?.submitted_by_name ?? null,
     submittedAt: reportRow?.submitted_at ?? null,
     submittedAtDisplay: formatTimestampMY(reportRow?.submitted_at),
+    acknowledgedByTeacherId: reportRow?.acknowledged_by_teacher_id ?? null,
+    acknowledgedByName: reportRow?.acknowledged_by_name ?? null,
+    acknowledgedAt: reportRow?.acknowledged_at ?? null,
+    acknowledgedAtDisplay: formatTimestampMY(reportRow?.acknowledged_at),
+    acknowledgementDateStr: ackParts?.date ?? null,
+    acknowledgementTimeStr: ackParts?.time ?? null,
     updatedAt: reportRow?.updated_at ?? null,
     updatedAtDisplay: formatTimestampMY(reportRow?.updated_at),
     reopenedAt: reportRow?.reopened_at ?? null,
