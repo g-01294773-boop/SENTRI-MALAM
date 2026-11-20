@@ -1,0 +1,271 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Global Primitives
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(uid) {
+      return isVerifiedUser() && request.auth.uid == uid;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email == 'g-01294773@moe-dl.edu.my' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidDateString(val) {
+      return val is string && val.size() == 10 && val.matches('^\\d{4}-\\d{2}-\\d{2}$');
+    }
+
+    // 3. Entity Validation Blueprints
+    function isValidUserPrivateProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.uid == userId
+        && data.email is string
+        && data.email.size() >= 3
+        && data.email.size() <= 180
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 120
+        && data.role in ['teacher', 'coordinator']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCampNight(data) {
+      return data.keys().hasAll(['nightId', 'title', 'startDate', 'isActive', 'ownerUid', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['nightId', 'title', 'startDate', 'isActive', 'ownerUid', 'createdAt', 'updatedAt'])
+        && data.nightId is int
+        && data.nightId >= 1
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 200
+        && isValidDateString(data.startDate)
+        && data.isActive is bool
+        && isValidId(data.ownerUid)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSlotSummary(data, campNightId) {
+      return data.keys().hasAll([
+          'campNightId', 'slotNumber', 'displayTime', 'startDate', 'endDate',
+          'quota', 'leaderName', 'memberNames', 'reportStatus', 'ownerUid',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'campNightId', 'slotNumber', 'displayTime', 'startDate', 'endDate',
+          'quota', 'leaderName', 'memberNames', 'reportStatus', 'ownerUid',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.campNightId)
+        && data.campNightId == campNightId
+        && data.slotNumber is int
+        && data.slotNumber >= 1
+        && data.slotNumber <= 6
+        && data.displayTime is string
+        && data.displayTime.size() >= 1
+        && data.displayTime.size() <= 100
+        && isValidDateString(data.startDate)
+        && isValidDateString(data.endDate)
+        && data.quota is int
+        && data.quota >= 0
+        && data.quota <= 50
+        && data.leaderName is string
+        && data.leaderName.size() <= 150
+        && data.memberNames is list
+        && data.memberNames.size() <= 30
+        && (data.memberNames.size() == 0 || (data.memberNames[0] is string && data.memberNames[0].size() <= 150))
+        && data.reportStatus in ['not_started', 'draft', 'submitted']
+        && isValidId(data.ownerUid)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSlotReportSnapshot(data, campNightId) {
+      return data.keys().hasAll([
+          'campNightId', 'slotNumber', 'status', 'leaderName', 'submittedByName',
+          'hasIncident', 'handoverStatus', 'photoCount', 'ownerUid',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'campNightId', 'slotNumber', 'status', 'leaderName', 'submittedByName',
+          'hasIncident', 'handoverStatus', 'photoCount', 'ownerUid',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.campNightId)
+        && data.campNightId == campNightId
+        && data.slotNumber is int
+        && data.slotNumber >= 1
+        && data.slotNumber <= 6
+        && data.status in ['not_started', 'draft', 'submitted']
+        && data.leaderName is string
+        && data.leaderName.size() <= 150
+        && data.submittedByName is string
+        && data.submittedByName.size() <= 150
+        && data.hasIncident in ['', 'Ya', 'Tidak']
+        && data.handoverStatus is string
+        && data.handoverStatus.size() <= 120
+        && data.photoCount is int
+        && data.photoCount >= 0
+        && data.photoCount <= 2
+        && isValidId(data.ownerUid)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // 4. Collection Rules
+    match /test/{docId} {
+      allow get: if isValidId(docId) && docId == 'connection';
+      allow list: if false;
+      allow write: if false;
+    }
+
+    match /admins/{uid} {
+      allow get: if isValidId(uid) && (isOwner(uid) || isAdmin());
+      allow list: if false;
+      allow write: if false;
+    }
+
+    match /users_private/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin() || (isVerifiedUser() && resource.data.uid == request.auth.uid);
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserPrivateProfile(incoming(), userId)
+        && incoming().email == request.auth.token.email
+        && incoming().role == 'teacher'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId)
+        && isValidUserPrivateProfile(incoming(), userId)
+        && (
+          (isOwner(userId)
+            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt'])
+            && incoming().uid == existing().uid
+            && incoming().email == existing().email
+            && incoming().role == existing().role
+            && incoming().createdAt == existing().createdAt
+            && incoming().updatedAt == request.time)
+          ||
+          (isAdmin()
+            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'role', 'updatedAt'])
+            && incoming().uid == existing().uid
+            && incoming().email == existing().email
+            && incoming().createdAt == existing().createdAt
+            && incoming().updatedAt == request.time)
+        );
+      allow delete: if false;
+    }
+
+    match /camp_nights/{campNightId} {
+      allow get: if isValidId(campNightId) && (isAdmin() || (isVerifiedUser() && existing().ownerUid == request.auth.uid));
+      allow list: if isAdmin() || (isVerifiedUser() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(campNightId)
+        && isVerifiedUser()
+        && isValidCampNight(incoming())
+        && incoming().ownerUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(campNightId)
+        && isVerifiedUser()
+        && isValidCampNight(incoming())
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (existing().ownerUid == request.auth.uid
+              && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'startDate', 'isActive', 'updatedAt']))
+        );
+      allow delete: if isValidId(campNightId) && isAdmin();
+
+      match /slots/{slotId} {
+        allow get: if isValidId(campNightId) && isValidId(slotId) && (isAdmin() || (isVerifiedUser() && existing().ownerUid == request.auth.uid));
+        allow list: if isAdmin() || (isVerifiedUser() && resource.data.ownerUid == request.auth.uid);
+        allow create: if isValidId(campNightId)
+          && isValidId(slotId)
+          && isVerifiedUser()
+          && isValidSlotSummary(incoming(), campNightId)
+          && incoming().ownerUid == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/camp_nights/$(campNightId));
+        allow update: if isValidId(campNightId)
+          && isValidId(slotId)
+          && isVerifiedUser()
+          && isValidSlotSummary(incoming(), campNightId)
+          && incoming().campNightId == existing().campNightId
+          && incoming().slotNumber == existing().slotNumber
+          && incoming().ownerUid == existing().ownerUid
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/camp_nights/$(campNightId))
+          && (
+            isAdmin()
+            || (existing().ownerUid == request.auth.uid
+                && incoming().diff(existing()).affectedKeys().hasOnly(['displayTime', 'startDate', 'endDate', 'quota', 'leaderName', 'memberNames', 'reportStatus', 'updatedAt']))
+          );
+        allow delete: if isValidId(campNightId) && isValidId(slotId) && isAdmin();
+      }
+
+      match /reports/{slotId} {
+        allow get: if isValidId(campNightId) && isValidId(slotId) && (isAdmin() || (isVerifiedUser() && existing().ownerUid == request.auth.uid));
+        allow list: if isAdmin() || (isVerifiedUser() && resource.data.ownerUid == request.auth.uid);
+        allow create: if isValidId(campNightId)
+          && isValidId(slotId)
+          && isVerifiedUser()
+          && isValidSlotReportSnapshot(incoming(), campNightId)
+          && incoming().ownerUid == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/camp_nights/$(campNightId));
+        allow update: if isValidId(campNightId)
+          && isValidId(slotId)
+          && isVerifiedUser()
+          && isValidSlotReportSnapshot(incoming(), campNightId)
+          && incoming().campNightId == existing().campNightId
+          && incoming().slotNumber == existing().slotNumber
+          && incoming().ownerUid == existing().ownerUid
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/camp_nights/$(campNightId))
+          && (
+            isAdmin()
+            || (existing().ownerUid == request.auth.uid
+                && existing().status != 'submitted'
+                && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'leaderName', 'submittedByName', 'hasIncident', 'handoverStatus', 'photoCount', 'updatedAt']))
+          );
+        allow delete: if isValidId(campNightId) && isValidId(slotId) && isAdmin();
+      }
+    }
+  }
+}

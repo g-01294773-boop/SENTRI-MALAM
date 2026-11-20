@@ -1,0 +1,330 @@
+{
+  "entities": {
+    "TestConnection": {
+      "title": "TestConnection",
+      "description": "Dokumen ujian sambungan Firestore semasa aplikasi dimulakan.",
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "description": "Status sambungan pelayan."
+        }
+      }
+    },
+    "AdminEntry": {
+      "title": "AdminEntry",
+      "description": "Rekod pentadbir / penyelaras yang disahkan dalam Firestore.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID Firebase pentadbir."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 180,
+          "description": "Alamat e-mel Google yang disahkan."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Cap masa pelayan semasa rekod dicipta."
+        }
+      },
+      "required": ["uid", "email", "createdAt"]
+    },
+    "UserPrivateProfile": {
+      "title": "UserPrivateProfile",
+      "description": "Profil peribadi pengguna Firebase (maklumat PII diasingkan).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID Firebase pemilik profil."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 180,
+          "description": "Alamat e-mel pengguna."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Nama paparan pengguna."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["teacher", "coordinator"],
+          "maxLength": 20,
+          "description": "Peranan asas pengguna (tidak boleh dinaik taraf sendiri ke coordinator)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Cap masa pelayan semasa profil dicipta."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Cap masa pelayan semasa profil dikemas kini."
+        }
+      },
+      "required": ["uid", "email", "displayName", "role", "createdAt", "updatedAt"]
+    },
+    "CampNightRecord": {
+      "title": "CampNightRecord",
+      "description": "Rekod malam perkhemahan Sentri Malam SK Tudan 2026 yang diselaraskan ke Firestore.",
+      "type": "object",
+      "properties": {
+        "nightId": {
+          "type": "integer",
+          "description": "ID malam perkhemahan daripada sistem."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Tajuk malam perkhemahan."
+        },
+        "startDate": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "Tarikh mula malam perkhemahan (YYYY-MM-DD)."
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Menandakan malam perkhemahan aktif."
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID pemilik / penyelaras yang menyelaraskan rekod."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Cap masa pelayan ciptaan."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Cap masa pelayan kemas kini."
+        }
+      },
+      "required": ["nightId", "title", "startDate", "isActive", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "SlotSummaryRecord": {
+      "title": "SlotSummaryRecord",
+      "description": "Ringkasan jadual dan ahli slot bertugas bagi malam perkhemahan.",
+      "type": "object",
+      "properties": {
+        "campNightId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "ID dokumen induk malam perkhemahan."
+        },
+        "slotNumber": {
+          "type": "integer",
+          "description": "Nombor slot bertugas (1 hingga 6)."
+        },
+        "displayTime": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "Waktu paparan slot."
+        },
+        "startDate": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "Tarikh mula slot."
+        },
+        "endDate": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "Tarikh tamat slot."
+        },
+        "quota": {
+          "type": "integer",
+          "description": "Kuota maksimum petugas (0 jika belum ditetapkan)."
+        },
+        "leaderName": {
+          "type": "string",
+          "maxLength": 150,
+          "description": "Nama Ketua Slot yang dilantik."
+        },
+        "memberNames": {
+          "type": "array",
+          "description": "Senarai nama guru berdaftar (dihadkan kepada maksimum 30 nama)."
+        },
+        "reportStatus": {
+          "type": "string",
+          "enum": ["not_started", "draft", "submitted"],
+          "maxLength": 20,
+          "description": "Status laporan bagi slot ini."
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID penyelia yang menyelaraskan slot."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Cap masa pelayan ciptaan."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Cap masa pelayan kemas kini."
+        }
+      },
+      "required": [
+        "campNightId",
+        "slotNumber",
+        "displayTime",
+        "startDate",
+        "endDate",
+        "quota",
+        "leaderName",
+        "memberNames",
+        "reportStatus",
+        "ownerUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SlotReportSnapshot": {
+      "title": "SlotReportSnapshot",
+      "description": "Ringkasan metadata laporan pemantauan slot (tanpa fail gambar binari).",
+      "type": "object",
+      "properties": {
+        "campNightId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "ID dokumen induk malam perkhemahan."
+        },
+        "slotNumber": {
+          "type": "integer",
+          "description": "Nombor slot bertugas (1 hingga 6)."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["not_started", "draft", "submitted"],
+          "maxLength": 20,
+          "description": "Status laporan semasa."
+        },
+        "leaderName": {
+          "type": "string",
+          "maxLength": 150,
+          "description": "Nama Ketua Slot."
+        },
+        "submittedByName": {
+          "type": "string",
+          "maxLength": 150,
+          "description": "Nama penghantar laporan."
+        },
+        "hasIncident": {
+          "type": "string",
+          "enum": ["", "Ya", "Tidak"],
+          "maxLength": 10,
+          "description": "Status kejadian susulan."
+        },
+        "handoverStatus": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Status serahan tugas."
+        },
+        "photoCount": {
+          "type": "integer",
+          "description": "Bilangan gambar yang dimuat naik (0 hingga 2)."
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID pemilik laporan / penyelia."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Cap masa pelayan ciptaan."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Cap masa pelayan kemas kini."
+        }
+      },
+      "required": [
+        "campNightId",
+        "slotNumber",
+        "status",
+        "leaderName",
+        "submittedByName",
+        "hasIncident",
+        "handoverStatus",
+        "photoCount",
+        "ownerUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/test/{docId}": {
+      "schema": {
+        "$ref": "#/entities/TestConnection"
+      },
+      "description": "Titik semakan sambungan Firestore semasa permulaan aplikasi."
+    },
+    "/admins/{uid}": {
+      "schema": {
+        "$ref": "#/entities/AdminEntry"
+      },
+      "description": "Senarai UID pentadbir yang disahkan untuk penyelaras."
+    },
+    "/users_private/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserPrivateProfile"
+      },
+      "description": "Profil peribadi pengguna Firebase yang mengasingkan e-mel dan maklumat peribadi."
+    },
+    "/camp_nights/{campNightId}": {
+      "schema": {
+        "$ref": "#/entities/CampNightRecord"
+      },
+      "description": "Rekod malam perkhemahan Sentri Malam."
+    },
+    "/camp_nights/{campNightId}/slots/{slotId}": {
+      "schema": {
+        "$ref": "#/entities/SlotSummaryRecord"
+      },
+      "description": "Ringkasan jadual dan ahli bagi setiap slot dalam malam perkhemahan."
+    },
+    "/camp_nights/{campNightId}/reports/{slotId}": {
+      "schema": {
+        "$ref": "#/entities/SlotReportSnapshot"
+      },
+      "description": "Snapshot metadata laporan pemantauan bagi setiap slot (tanpa gambar binari)."
+    }
+  }
+}
