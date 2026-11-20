@@ -1,0 +1,6 @@
+{
+  "name": "Pendaftaran dan Pelaporan Sentri Malam — SK Tudan 2026",
+  "description": "Sistem pendaftaran giliran sentri malam, pengurusan ketua slot, pelaporan pemantauan berserta dua gambar, serta eksport PDF dan ZIP bagi Perkhemahan Bersepadu Badan Beruniform SK Tudan 2026.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
